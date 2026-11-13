@@ -1,0 +1,68 @@
+# Config used by the test suite (copied into a temporary bridge home by conftest.py).
+
+[general]
+cwd = "{home}/workspace"
+session_hours = 12
+max_failures = 5
+lockout_minutes = 15
+whisper_model = "large-v3-turbo"
+whisper_preload = true
+edit_interval_seconds = 3.0
+heartbeat_seconds = 15
+document_threshold_chars = 12000
+task_timeout_minutes = 60
+inbox_retention_days = 7
+idle_lock_hours = 3
+allowed_cwd_roots = ["{home}/workspace", "{home}"]
+
+[local_model]
+url = "http://127.0.0.1:8081"
+idle_stop_minutes = 20
+startup_timeout_minutes = 6
+start_command = ["local-model-start"]
+stop_command = ["local-model-stop"]
+
+[bots.claude]
+display_name = "Claude"
+token_env = "CLAUDE_BOT_TOKEN"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]
+resume_args = ["--resume", "{session_id}"]
+needs_local_model = false
+context_window = 200000
+append_system_prompt = "Your name is Claude. You are being driven from Telegram. To save context, delegate the actual work to subagents. Read the notes in the brain folder at the start of a session. Never use the fable model. Reply concisely."
+
+[bots.claude.env]
+
+[bots.qwen]
+display_name = "Qwen"
+token_env = "QWEN_BOT_TOKEN"
+command = "claude"
+args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions",
+        "--tools", "Bash,Read,Write,Edit,Glob,Grep,WebFetch", "--strict-mcp-config", "--disable-slash-commands"]
+resume_args = ["--resume", "{session_id}"]
+needs_local_model = true
+context_window = 131072
+context_window_source = "config"
+mode = "auto"
+chat_max_tokens = 2048
+chat_system_prompt = "Your name is Qwen. You are chatting with the user through Telegram in fast chat mode: you have no tools here. Reply concisely in the user's language."
+append_system_prompt = "Your name is Qwen. At the start of every new session, read the notes in the brain folder. Reply concisely."
+
+[bots.qwen.env]
+MAX_THINKING_TOKENS = "0"
+ANTHROPIC_BASE_URL = "http://127.0.0.1:8081"
+ANTHROPIC_AUTH_TOKEN = "dummy"
+ANTHROPIC_MODEL = "local-model"
+ANTHROPIC_SMALL_FAST_MODEL = "local-model"
+ANTHROPIC_DEFAULT_SONNET_MODEL = "local-model"
+ANTHROPIC_DEFAULT_OPUS_MODEL = "local-model"
+ANTHROPIC_DEFAULT_HAIKU_MODEL = "local-model"
+CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1"
+CLAUDE_CODE_MAX_CONTEXT_TOKENS = "131072"
+
+[bots.qwen.memory]
+enabled = true
+dir = "{home}/memory"
+notice_text = "💾 Saving this to the brain (agent run follows)."
+save_prompt = """[Automatic brain save] The user's latest message(s) above contain something durable to remember (a fact about the user or their projects, or an explicit request to save). 1) Read {home}/memory/README.md and follow its editing rules. 2) Update the right brain file (facts only, no secrets, no duplicates; remove outdated facts). If on reflection nothing durable was said, change nothing and say so. 3) Append a dated entry to memory/log.md (agent name: Qwen). 4) Reply in the user's language with one short line saying exactly what was saved and where."""
