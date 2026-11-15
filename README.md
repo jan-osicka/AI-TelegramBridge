@@ -1,88 +1,76 @@
 # AI-TelegramBridge
 
-telegram-bridge lets you drive [Claude Code](https://claude.com/claude-code) on your own computer from Telegram. Optionally it can also drive a local model through a second bot. You write to a bot, the bridge runs the agent on your PC and sends the answer back.
+[![CI](https://github.com/jan-osicka/AI-TelegramBridge/actions/workflows/ci.yml/badge.svg)](https://github.com/jan-osicka/AI-TelegramBridge/actions/workflows/ci.yml)
+![Python 3.12](https://img.shields.io/badge/python-3.12-blue)
+![Windows | Linux | macOS](https://img.shields.io/badge/os-Windows%20%7C%20Linux%20%7C%20macOS-lightgrey)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green)](LICENSE)
 
-You can send text, photos, files and voice messages. You get back answers, files (the agent marks them with `[tg-file]` lines), live progress while a task runs, and a pinned message that shows whether the bridge is locked or unlocked.
+**Send a message from your phone, and the AI agent on your own computer does the work and sends you the result.**
 
-It uses long polling. There is nothing to host, no port to open and no public IP needed.
+You write to a Telegram bot. The bridge passes the task to [Claude Code](https://claude.com/claude-code) running on your PC, shows what it is doing while it works, and sends back the answer and any files it made. A second bot can drive a local model the same way, for free and offline. Text, photos, files, voice messages and videos all work.
 
-## Warning: full access
+Nothing is hosted in the cloud. There is no port to open and no public IP. Only your Telegram account gets in, and only after a 2FA code.
 
-This bot can run any command on this computer. The whitelist, 2FA and the safety rules in the prompt are what protect it.
+<!-- Demo: add screenshots or a GIF here, e.g. docs/demo.gif -->
 
-The example config starts the agent with `--permission-mode bypassPermissions`, which means it never asks before running a command. Read [SECURITY.md](SECURITY.md) before you put a token in `.env`.
+## What it can do
 
-## Features
+- Run any task on your PC from your phone: code, files, research, scripts, system admin.
+- Show live progress while the agent works: the current tool, steps, subagents, elapsed time.
+- Take photos, documents, voice messages (transcribed locally with Whisper) and videos (frames plus transcript).
+- Send files back. The agent adds a `[tg-file]` line to its answer and the bridge uploads the file.
+- Keep context between messages, show how full the context is, and survive restarts.
+- Drive a local model as a second bot, with a fast chat mode for quick questions.
+- `notify` command so any script or scheduled job can message you.
+- `doctor` command that checks the whole installation without changing anything.
+- Autostart on Windows, Linux and macOS.
 
-- One process, one or two bots (for example a Claude bot and a local-model bot).
-- Whitelist of Telegram user ids plus TOTP 2FA (`/unlock 123456`), a session limit and an idle lock.
-- Progress message while a task runs: current tool, steps, subagents, elapsed time.
-- Secret masking on everything that leaves the bridge (messages, logs, `notify`).
-- Files and photos in, files out. Voice messages are transcribed with Whisper (optional).
-- Context meter, session resume, working folder per chat (`/cwd`), task queue, `/stop`.
-- Optional fast chat mode for a local model, with an optional memory folder.
-- `notify` command to send a message or file from any script.
-- `doctor` command that checks the installation without changing anything.
-- Autostart on Windows (Task Scheduler), Linux (systemd user unit) and macOS (launchd).
+## How it works
 
-## Requirements
-
-### Required
-
-- Windows 10/11, Linux or macOS. Windows is used every day. Linux and macOS are tested in CI.
-- Python 3.12 and [uv](https://docs.astral.sh/uv/).
-- Claude Code CLI, installed and logged in. You need a Claude subscription (Pro or Max, for example) or an Anthropic API key.
-- A Telegram account and a bot token from [@BotFather](https://t.me/BotFather).
-- An authenticator app (Google Authenticator, Microsoft Authenticator or similar) for TOTP 2FA.
-- Internet access.
-
-The bridge itself is light. Any machine that runs Claude Code is enough. Plan for about 200 MB of RAM for the bridge, plus disk space for the virtual environment.
-
-### Optional: voice messages
-
-Install the `voice` extra (faster-whisper) and ffmpeg. The default model is `large-v3-turbo`. It needs about 1.6 GB of VRAM on an NVIDIA GPU (CUDA, `cuda` extra on Windows and Linux), or it runs on the CPU, more slowly. The model is about 1.6 GB and downloads on first use.
-
-### Optional: local model (second bot)
-
-Any OpenAI-compatible local server can work. The example config is for Qwen served by Strata.
-
-How much memory you need depends on the model and quantisation you pick in Strata. RAM and VRAM add up, so a model can be split between the GPU and system memory. Rough figures for Qwen:
-
-| Model and quantisation | RAM + VRAM |
-|---|---|
-| Qwen coder version | about 32 GB |
-| Qwen3.8-Flash-Next, Q2_0 | about 38 GB |
-| Qwen3.8-Flash-Next, IQ3_S, 128K context | about 55 GB |
-
-Whatever model you choose needs tool calling for agent mode (the bot doing things on the PC). Sending photos to the local bot needs a model with image support. The first start loads the model and can take a few minutes.
-
-## Install
-
-### Windows (PowerShell)
-
-```powershell
-powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-git clone https://github.com/jan-osicka/AI-TelegramBridge
-cd AI-TelegramBridge
-uv sync --extra voice --extra qr
+```mermaid
+flowchart LR
+    phone["Telegram<br/>(your phone)"] <-->|long polling| bridge["telegram-bridge<br/>(your PC)"]
+    bridge --> gate{"whitelist<br/>+ TOTP 2FA"}
+    gate -->|"claude -p<br/>stream-json"| cc["Claude Code"]
+    gate -->|"chat or agent mode"| lm["Local model<br/>(OpenAI-compatible server)"]
+    cc --> pc[("files, shell,<br/>tools")]
+    lm --> pc
 ```
 
-On an NVIDIA GPU add `--extra cuda` to the last command. For voice, also install ffmpeg (for example `winget install ffmpeg`).
+The bridge is one Python process that polls Telegram for both bots. For each task it starts the agent CLI in headless mode, reads its stream-json output line by line, and turns the events into a progress message that it edits in place. When the task ends it sends the final answer, formatted for Telegram and split safely, plus any files.
 
-### Linux and macOS
+Some design decisions that matter in daily use:
+
+- **Prompt cache aware sessions.** Each reply resumes the same Claude Code session, so the agent keeps its context. A large session that sat idle for over an hour starts fresh, because the prompt cache has expired by then and resuming would re-read the whole context at full price. `/back` returns to the old session if you need it.
+- **Context meter.** Every answer ends with how full the context window is, with warnings at 70% and 90%, so you know when to start a new session.
+- **Live subagent view.** When Claude Code delegates work to subagents, the progress message shows each one and what it did last.
+- **Restart without losing work.** The running task and the queue are written to a journal. After a crash or reboot the bridge tells you what was cut off and waits for `/resume` or `/drop`. It never repeats a task on its own.
+- **Local model on demand.** The second bot starts the model server when a task arrives and stops it after 20 minutes idle, so the VRAM is free the rest of the time. Short questions go straight to the chat API and get an answer in a second or two. Tasks that need tools go through the full agent loop.
+- **Secrets never leave by accident.** Every reply, notification and log line is scanned and API keys or tokens are masked. The scan runs before the text is split into Telegram messages, so a secret can't slip through cut in half.
+- **Outgoing files are checked after the path is resolved,** so `..`, symlinks and junctions can't get around the outbox rules.
+
+## How it was built
+
+I built this with Claude Code as a test of how far careful agent work can go on a real tool I use every day.
+
+The bigger changes started as a written spec with goals, non-goals and "anti-goals" (things that count as failure even if the code works, like a safeguard that exists but is never called). Then came an implementation plan split into tasks. Claude Code worked through the tasks with subagents, each change was reviewed against the spec, and the whole branch got a final review before it went live. Tests were written alongside the code: there are now 365, and CI runs them on Windows, Linux and macOS on every push.
+
+A test also checks that no personal data (names, paths, persona prompts) ends up in the repository. Everything personal lives in the user's own config folder.
+
+## Quick start
+
+You need Python 3.12, [uv](https://docs.astral.sh/uv/), Claude Code installed and logged in (a Claude subscription or an API key), a Telegram account and an authenticator app. Windows is used every day, Linux and macOS are tested in CI. Voice and the local model are optional, see [USAGE.md](USAGE.md#requirements-in-detail).
 
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/jan-osicka/AI-TelegramBridge
 cd AI-TelegramBridge
-uv sync --extra voice --extra qr
+uv sync --extra qr             # add --extra voice for voice messages, --extra cuda on an NVIDIA GPU
+uv run telegram-bridge setup
 ```
 
-On Linux with an NVIDIA GPU add `--extra cuda`. For voice, install ffmpeg with your package manager (`apt install ffmpeg`, `brew install ffmpeg`). Without voice, use `uv sync --extra qr`.
+Install uv with `powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"` on Windows or `curl -LsSf https://astral.sh/uv/install.sh | sh` on Linux and macOS. Voice also needs ffmpeg (`winget install ffmpeg`, `apt install ffmpeg`, `brew install ffmpeg`).
 
-Then install Claude Code by following [its setup guide](https://docs.claude.com/en/docs/claude-code/setup), start `claude` once and log in.
-
-## Setup
+### Setup step by step
 
 1. Open Telegram, talk to [@BotFather](https://t.me/BotFather), send `/newbot` and copy the token.
 2. Run `uv run telegram-bridge setup`. It creates the home folder `~/.telegram-bridge` (or the folder in `TELEGRAM_BRIDGE_HOME`) with `inbox`, `outbox` and `logs`, a `.env` template, a TOTP secret, a QR code (`totp-qr.png`) and a copy of the example config as `config.toml`. It also restricts the folder to your user. Add `--whisper` to download the voice model now.
@@ -113,18 +101,17 @@ All three start `telegram-bridge run --service` from the project virtual environ
 
 ## Using it
 
-Commands (the two model commands appear only for a bot with `needs_local_model`):
-
 | Command | What it does |
 | --- | --- |
 | `/unlock <code>` | Unlock with a 2FA code |
 | `/lock` | End the unlocked session |
 | `/exit`, `/new` | Clear the context and start a new session |
+| `/back` | Return to the session an idle reset replaced |
 | `/stop` | Kill the running task. `/stop all` also clears the queue |
+| `/resume`, `/drop` | Continue or forget a task a restart interrupted |
 | `/status` | Lock state, running task, session |
 | `/cwd [path]` | Show or set the working folder |
-| `/modelstart` | Start the local model server |
-| `/modelstop` | Stop the local model server |
+| `/modelstart`, `/modelstop` | Start or stop the local model server (local-model bot only) |
 | `/help` | List the commands |
 
 Anything else is a task for the agent. More detail, including chat mode for a local model, is in [USAGE.md](USAGE.md).
@@ -150,9 +137,16 @@ Options: `--bot NAME`, `--file PATH` (repeatable), `--silent`. Exit codes: 0 ok,
 
 **Pinned status message.** Each bot keeps one pinned message in your private chat. It shows whether the bridge is locked or unlocked, and until when. Set `status_pin = false` in `[general]` to turn it off.
 
-## Security model
+## Security
 
-Only whitelisted ids get an answer. 2FA is needed to use the agent. The session expires. Secrets are masked on the way out. The agent can send only files from the outbox. Details and limits are in [SECURITY.md](SECURITY.md).
+The agent has full access to the computer. The example config starts Claude Code with `--permission-mode bypassPermissions`, so it never asks before running a command. That is the point of the tool, and it is why the access control is strict:
+
+- Only whitelisted Telegram ids get any answer. Everyone else is ignored and logged.
+- Every session starts with a TOTP code, wrong codes lock you out, and sessions expire after a set time and after inactivity.
+- Secrets are masked in everything that leaves the bridge.
+- The agent can send only files from the outbox.
+
+Read [SECURITY.md](SECURITY.md) before you put a token in `.env`. It also lists what is not protected.
 
 ## Troubleshooting
 
@@ -164,14 +158,7 @@ Only whitelisted ids get an answer. 2FA is needed to use the agent. The session 
 
 ## Updating and uninstalling
 
-Update:
-
-```
-git pull
-uv sync --extra voice --extra qr
-```
-
-Use the same extras as before. Then restart the service (on Windows: `Stop-ScheduledTask -TaskName TelegramBridge; Start-ScheduledTask -TaskName TelegramBridge`).
+Update with `git pull`, then `uv sync` with the same extras as before, then restart the service (on Windows: `Stop-ScheduledTask -TaskName TelegramBridge; Start-ScheduledTask -TaskName TelegramBridge`). What changed is in [CHANGELOG.md](CHANGELOG.md).
 
 Uninstall: run `uv run telegram-bridge service remove`, then delete the project folder and `~/.telegram-bridge`. Revoke the bot token in @BotFather if you no longer need it.
 
@@ -184,7 +171,7 @@ uv run pytest -q
 
 ## Credits
 
-The secret-detection patterns and several other ideas and patterns come from [Agent2Telegram](https://github.com/petrludwig-collab/Agent2Telegram), MIT licence. See `NOTICE`.
+The secret-detection patterns and several other ideas come from [Agent2Telegram](https://github.com/petrludwig-collab/Agent2Telegram), MIT licence. See `NOTICE`.
 
 ## License
 

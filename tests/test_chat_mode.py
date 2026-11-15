@@ -123,6 +123,24 @@ def test_chat_image_sent_as_image_content(monkeypatch, tmp_path):
     assert s.chats.history[5][0]["content"] == "co to je [image]"
 
 
+def test_chat_video_frames_capped_to_two(monkeypatch, tmp_path):
+    s = make_svc()
+    imgs = []
+    for i in range(4):
+        f = tmp_path / f"f{i}.jpg"
+        f.write_bytes(b"\xff\xd8fake")
+        imgs.append(f)
+    seen = []
+
+    async def fake_complete(url, messages, **kw):
+        seen.append(messages)
+        return "ok"
+    monkeypatch.setattr(chatmod, "complete", fake_complete)
+    asyncio.run(s.run_chat(5, {"mode": "chat", "text": "video", "prompt": "", "images": imgs}))
+    parts = seen[0][-1]["content"]
+    assert [p["type"] for p in parts] == ["text", "image_url", "image_url"]
+
+
 def test_chat_failure_rolls_back_user_turn(monkeypatch):
     s = make_svc()
 

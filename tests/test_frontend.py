@@ -536,3 +536,73 @@ def test_log_filter_masks_traceback_and_message(tmp_path):
     f.filter(rec)
     out = logging.Formatter("%(message)s").format(rec)
     assert tok not in out and "exactsecret1234" not in out
+
+
+# ---- idle reset: a big session idle past the prompt-cache lifetime starts fresh, /back returns to it
+def test_idle_reset_new_session_and_back(tmp_path):
+    s = make(store=StateStore(tmp_path / "s.json"))
+    s.cfg = {**s.cfg, "idle_new_session_minutes": 60, "idle_new_session_tokens": 30000}
+    now = [1_000_000.0]
+    s.wall = lambda: now[0]
+    seen = []
+
+    def run_with(sid, tokens):
+        async def run(prompt, session_id=None, on_event=None):
+            seen.append(session_id)
+            s.runner.stats = stats(tokens=tokens)
+            return "ok", session_id or sid, False
+        s.runner.run = run
+
+    run_with("old", 85000)
+    run_task(s)
+    assert s.sessions[5] == "old" and s.ctx[5]["last"] == now[0]
+    now[0] += 59 * 60                     # still cached: resume
+    run_task(s)
+    assert seen[-1] == "old"
+    now[0] += 3 * 3600                    # cache gone: fresh session with a notice
+    run_with("new", 20000)
+    bot = run_task(s)
+    assert seen[-1] is None and s.sessions[5] == "new"
+    assert any(t.startswith("🆕 New session: idle 3 h and the old one (~85k tokens)") for t in bot.texts())
+    assert StateStore(tmp_path / "s.json").load("claude")["ctx"][5]["last"] == now[0]   # persisted
+
+    # /back survives a bridge restart: a fresh service on the same state file still has the parked session
+    s2 = make(store=StateStore(tmp_path / "s.json"))
+    assert s2.parked[5]["sid"] == "old" and s2.parked[5]["ctx"]["tokens"] == 85000
+    replies = []
+
+    async def back():
+        msg = SimpleNamespace(reply_text=lambda t, **kw: asyncio.sleep(0, replies.append(t)))
+        await s.command(SimpleNamespace(effective_message=msg), "back", "", 5, 5)
+    asyncio.run(back())
+    assert s.sessions[5] == "old" and s.ctx[5]["tokens"] == 85000 and replies[-1].startswith("↩️ Back")
+    run_task(s)                           # /back refreshed the idle clock: no second reset
+    assert seen[-1] == "old"
+    asyncio.run(back())
+    assert replies[-1] == "Nothing to go back to."
+
+
+def test_idle_reset_skips_small_sessions_resumed_tasks_and_off():
+    s = make()
+    s.cfg = {**s.cfg, "idle_new_session_minutes": 60, "idle_new_session_tokens": 30000}
+    s.wall = lambda: 10_000.0
+    s.sessions[5] = "sid"
+    s.ctx[5] = {**s.ctx_entry(5), "tokens": 20000, "last": 0.0}
+    assert s.idle_reset_due(5) is None    # small: re-reading is cheap
+    s.ctx[5]["tokens"] = 90000
+    assert s.idle_reset_due(5) == 10_000.0
+    s.ctx[5].pop("last")
+    assert s.idle_reset_due(5) is None    # no timestamp (state from before this feature)
+    s.ctx[5]["last"] = 0.0
+    s.cfg["idle_new_session_minutes"] = 0
+    assert s.idle_reset_due(5) is None    # off
+    s.cfg["idle_new_session_minutes"] = 60
+    seen = []
+
+    async def run(prompt, session_id=None, on_event=None):
+        seen.append(session_id)
+        s.runner.stats = stats()
+        return "ok", session_id, False
+    s.runner.run = run
+    asyncio.run(s.run_task(5, "go on", 7, session_id="sid"))   # /resume after a restart keeps its session
+    assert seen == ["sid"] and 5 not in s.parked

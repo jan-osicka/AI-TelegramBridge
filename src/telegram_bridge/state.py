@@ -30,6 +30,8 @@ def _clean_ctx(v):
     out = {"tokens": num(v.get("tokens")), "window": num(v.get("window")), "pct": num(v.get("pct")),
            "warned": sorted({int(x) for x in (v.get("warned") or []) if isinstance(x, (int, float))}),
            "trimmed": bool(v.get("trimmed"))}
+    if num(v.get("last")) is not None:
+        out["last"] = float(v["last"])   # wall-clock time of the last agent reply (idle reset)
     return out
 
 
@@ -51,21 +53,23 @@ class StateStore:
             return {"bots": {}}
 
     def load(self, bot):
-        """Returns {"sessions", "cwds", "chats", "ctx"}: {int: str}, {int: str}, {int: [msgs]},
-        {int: {"tokens", "window", "pct", "warned": [levels], "trimmed": bool}} (empty parts if none)."""
+        """Returns {"sessions", "cwds", "chats", "ctx", "parked"}: {int: str}, {int: str}, {int: [msgs]},
+        {int: {"tokens", "window", "pct", "warned": [levels], "trimmed": bool}}, {int: {"sid", "ctx"}} (empty parts if none)."""
         b = self._read().get("bots", {}).get(bot) or {}
-        out = {"sessions": {}, "cwds": {}, "chats": {}, "ctx": {}}
+        out = {"sessions": {}, "cwds": {}, "chats": {}, "ctx": {}, "parked": {}}
         try:
             out["sessions"] = {int(k): str(v) for k, v in (b.get("sessions") or {}).items()}
             out["cwds"] = {int(k): str(v) for k, v in (b.get("cwds") or {}).items()}
             out["chats"] = {int(k): clean_history({k: v})[str(k)] for k, v in (b.get("chats") or {}).items() if v}
             out["ctx"] = {int(k): _clean_ctx(v) for k, v in (b.get("ctx") or {}).items() if isinstance(v, dict)}
+            out["parked"] = {int(k): {"sid": str(v["sid"]), "ctx": _clean_ctx(v.get("ctx") or {})}
+                             for k, v in (b.get("parked") or {}).items() if isinstance(v, dict) and v.get("sid")}
         except Exception as e:
             log.warning("sessions for bot %s unreadable (%s); starting empty", bot, type(e).__name__)
-            return {"sessions": {}, "cwds": {}, "chats": {}, "ctx": {}}
+            return {"sessions": {}, "cwds": {}, "chats": {}, "ctx": {}, "parked": {}}
         return out
 
-    def save(self, bot, sessions, cwds, chats, ctx=None):
+    def save(self, bot, sessions, cwds, chats, ctx=None, parked=None):
         with self._lock:
             d = self._read()
             d.setdefault("bots", {})[bot] = {
@@ -73,6 +77,7 @@ class StateStore:
                 "cwds": {str(k): v for k, v in cwds.items()},
                 "chats": clean_history(chats),
                 "ctx": {str(k): _clean_ctx(v) for k, v in (ctx or {}).items() if v},
+                "parked": {str(k): {"sid": v["sid"], "ctx": _clean_ctx(v["ctx"])} for k, v in (parked or {}).items()},
             }
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)

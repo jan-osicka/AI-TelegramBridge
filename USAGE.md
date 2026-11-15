@@ -17,7 +17,9 @@ Each bot keeps one pinned message in your private chat that shows whether the br
 | `/unlock <code>` | Unlock with a 2FA code |
 | `/lock` | End the unlocked session now |
 | `/exit`, `/new` | Clear the context and start a new session |
+| `/back` | Return to the session that an idle reset replaced (after 60 min idle, a session over 30k tokens starts fresh because the prompt cache expired; `idle_new_session_minutes` / `idle_new_session_tokens` per bot, 0 = off) |
 | `/stop` | Kill the running task. `/stop all` also clears the queue |
+| `/resume`, `/drop` | Continue or forget the task that a restart interrupted (see below) |
 | `/status` | Lock state, running task, session |
 | `/cwd [path]` | Show or set the working folder (only inside `allowed_cwd_roots`) |
 | `/modelstart`, `/modelstop` | Start or stop the local model (only for bots with `needs_local_model`) |
@@ -31,7 +33,9 @@ Anything else is a task for the agent.
 - The reply ends with a context line such as `42% context`. The Claude bot also shows the cost of the run.
 - Replies longer than `document_threshold_chars` are sent as a file. Other messages are split at Telegram's limit of 4096 characters.
 - Send a photo, document or voice message and the agent gets the file path. Voice is transcribed first when the `voice` extra is installed. Downloads older than `inbox_retention_days` are deleted.
+- Videos, round video notes and GIFs work too, up to the 20 MB limit of Telegram bots. With ffmpeg installed, the bridge takes `video_frames` still frames (doubled for clips over 60 seconds, at most 8) and transcribes the audio when `video_transcribe` is on. The agent gets the video path, the transcript and the frame paths. Without ffmpeg only the file is passed on.
 - The session resumes after a restart. The bridge tells you when it is back online.
+- If a restart cuts a task off, or messages were still waiting in the queue, the bridge tells you once it is back and shows what was interrupted. It never continues on its own. Send `/resume` to run the task again in the same session (the agent is told to check what was already done first), followed by the waiting messages, or `/drop` to forget them. Unanswered offers expire after 7 days.
 
 ## Getting files back
 
@@ -68,3 +72,23 @@ Per bot you can also set `agent_triggers` and `save_triggers` (lists of regular 
 ## Troubleshooting
 
 Run `telegram-bridge doctor` first. Logs are in `<home>/logs/bridge.log`, and secrets are masked there too. If the bridge says it is already running, a live process holds the lock. A lock file left behind by a crash does not block a start.
+
+## Requirements in detail
+
+### Voice messages
+
+Install the `voice` extra (faster-whisper) and ffmpeg. The default model is `large-v3-turbo`. It needs about 1.6 GB of VRAM on an NVIDIA GPU (CUDA, `cuda` extra on Windows and Linux), or it runs on the CPU, more slowly. The model is about 1.6 GB and downloads on first use.
+
+### Local model (second bot)
+
+Any OpenAI-compatible local server can work. The example config is for Qwen served by Strata.
+
+How much memory you need depends on the model and quantisation. RAM and VRAM add up, so a model can be split between the GPU and system memory. Rough figures for Qwen:
+
+| Model and quantisation | RAM + VRAM |
+|---|---|
+| Qwen coder version | about 32 GB |
+| Qwen3.8-Flash-Next, Q2_0 | about 38 GB |
+| Qwen3.8-Flash-Next, IQ3_S, 128K context | about 55 GB |
+
+Agent mode (the bot doing things on the PC) needs a model with tool calling. Photos need a model with image support. The first start loads the model and can take a few minutes.

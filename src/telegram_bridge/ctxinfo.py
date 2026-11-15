@@ -49,6 +49,20 @@ def trimmed_notice(keep=24):
     return f"ℹ️ Older chat messages dropped from my memory (keeps the last {keep})."
 
 
+def _ago(seconds):
+    h = seconds / 3600
+    return f"{h:.0f} h" if h < 48 else f"{h / 24:.0f} d"
+
+
+def idle_reset_notice(idle_s, tokens):
+    return (f"🆕 New session: idle {_ago(idle_s)} and the old one (~{round((tokens or 0) / 1000)}k tokens) is no longer "
+            f"cached, so continuing it would re-read all of it. /back returns to it.")
+
+
+def back_notice(tokens):
+    return f"↩️ Back to the previous session (~{round((tokens or 0) / 1000)}k tokens). The next message re-reads it in full."
+
+
 def large_session_notice(tokens):
     return (f"⏳ Large session (~{round(tokens / 1000)}k tokens): the first reply after a restart re-reads it, "
             f"~{round(tokens / 2300)} s. /exit for a fresh start.")

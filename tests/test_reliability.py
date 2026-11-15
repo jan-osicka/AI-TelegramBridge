@@ -37,7 +37,7 @@ def test_state_roundtrip_atomic_and_keyed_by_bot(tmp_path):
     assert a["sessions"] == {5: "sid-1"} and a["cwds"] == {5: "C:\\AI"} and a["chats"] == {}
     assert b["sessions"] == {5: "sid-2"} and b["chats"][5][1]["content"] == "yo"
     assert not list(tmp_path.glob("*.tmp"))
-    assert st.load("nobody") == {"sessions": {}, "cwds": {}, "chats": {}, "ctx": {}}
+    assert st.load("nobody") == {"sessions": {}, "cwds": {}, "chats": {}, "ctx": {}, "parked": {}}
 
 
 def test_state_corrupt_starts_empty(tmp_path, caplog):

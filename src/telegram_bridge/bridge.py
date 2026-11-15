@@ -5,6 +5,7 @@ import logging
 import logging.handlers
 import re
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -16,11 +17,13 @@ from . import chat as chatmod
 from . import ctxinfo
 from . import fmt
 from . import housekeeping
+from . import journal as journalmod
 from . import media
 from . import outfiles
 from . import progress
 from . import redaction, statuspin
 from . import settings
+from . import video as videomod
 from .auth import Auth
 from .localmodel import LocalModelError, LocalModelManager
 from .runner import Runner
@@ -34,7 +37,10 @@ COMMANDS = [
     ("lock", "End the unlocked session"),
     ("exit", "Clear the context (new session)"),
     ("new", "Same as /exit"),
+    ("back", "Return to the session an idle reset replaced"),
     ("stop", "Kill the running task (/stop all: also clear the queue)"),
+    ("resume", "Continue the task interrupted by a restart"),
+    ("drop", "Forget the task interrupted by a restart"),
     ("status", "Lock state, running task, session"),
     ("cwd", "Show or set working directory"),
     ("help", "List commands"),
@@ -127,9 +133,22 @@ def fmt_tool(ev):
     return f"🔧 {ev['name']}: {d}" if d else f"🔧 {ev['name']}"
 
 
+RESUME_PREFIX = ("The previous run of the request below was interrupted by a PC or bridge restart. Before continuing, "
+                 "check what was already done (files, git status, logs) and do not repeat steps that already happened, "
+                 "especially ones that cannot be undone (pushes, sent messages, deletions). Then finish the request.\n\n"
+                 "Original request:\n")
+MAX_RECORD_CHARS = 20000
+RESTART_NOTICE = "⚠️ Bridge restarting. The task will be offered for /resume when it is back."
+
+
+MAX_DOWNLOAD = 20 * 1024 * 1024
+MAX_CHAT_IMAGES = 2
+
+
 class BotService:
-    def __init__(self, name, cfg, token, auth, general, qwen=None, clock=time.monotonic, store=None, local_url=None, pin_path=None):
+    def __init__(self, name, cfg, token, auth, general, qwen=None, clock=time.monotonic, store=None, local_url=None, pin_path=None, journal=None):
         self.clock = clock
+        self.wall = time.time   # wall clock for idle times that must survive restarts
         self._notice_at = {}  # chat_id -> time of last "locked" notice
         self.name, self.cfg, self.token, self.auth, self.g = name, cfg, token, auth, general
         if self.outgoing_files:   # tell the agent how to send files, once (the config dict is not touched)
@@ -151,10 +170,16 @@ class BotService:
         self.last_mode = {}  # chat_id -> "agent" | "chat": who handled the previous turn (auto-mode follow-ups)
         self.unseen = {}     # chat_id -> [(role, text)] chat-mode turns the agent session has not seen yet
         self.cwds = {}       # chat_id -> cwd
-        self.ctx = {}        # chat_id -> {tokens, window, pct, warned: [levels], trimmed}
+        self.ctx = {}        # chat_id -> {tokens, window, pct, warned: [levels], trimmed, last}
+        self.parked = {}     # chat_id -> {"sid", "ctx"}: the session an idle reset replaced, for /back
         self.cold_start = False   # Strata was started for the task that is about to run
         self.heartbeat_s = float(general.get("heartbeat_seconds", 15))
         self.queue = asyncio.Queue()
+        self.journal = journal or journalmod.Journal()   # in memory only unless main() passes the file-backed one
+        self._offered = False
+        self.shutdown_killed = False   # stop() killed a running task: that task was interrupted
+        self.shutting_down = False   # a stop for restart keeps the journal: the task counts as interrupted
+        self.interrupted = {}        # chat -> {"task", "queue"} left over from the previous run, awaiting /resume or /drop
         self._load_state()
         self.current = None  # (chat_id, prompt preview)
         self.app = None
@@ -179,10 +204,11 @@ class BotService:
                      if Path(p).is_dir() and housekeeping.cwd_allowed(p, self.cwd_roots())}
         self.chats.history = d["chats"]
         self.ctx = d["ctx"]
+        self.parked = d["parked"]
 
     def save_state(self):
         if self.store:
-            self.store.save(self.name, self.sessions, self.cwds, self.chats.history, self.ctx)
+            self.store.save(self.name, self.sessions, self.cwds, self.chats.history, self.ctx, self.parked)
 
     def ctx_entry(self, chat):
         return self.ctx.setdefault(chat, {"tokens": None, "window": None, "pct": None, "warned": [], "trimmed": False})
@@ -194,7 +220,18 @@ class BotService:
         self.unseen.pop(chat, None)
         self.chats.clear(chat)
         self.ctx.pop(chat, None)
+        self.parked.pop(chat, None)
         self.save_state()
+
+    def idle_reset_due(self, chat):
+        """Seconds idle if the session should be replaced (idle past the prompt-cache lifetime and big), else None."""
+        mins = float(self.cfg.get("idle_new_session_minutes") or 0)
+        e = self.ctx.get(chat) or {}
+        last, tokens = e.get("last"), e.get("tokens") or 0
+        if not mins or last is None or tokens < int(self.cfg.get("idle_new_session_tokens", 30000)):
+            return None
+        idle = self.wall() - last
+        return idle if idle >= mins * 60 else None
 
     # ---- helpers
     def help(self):
@@ -327,9 +364,69 @@ class BotService:
             return
         busy = self.runner.running or not self.queue.empty()
         item["msg_id"] = getattr(msg, "message_id", None)
-        await self.queue.put((chat, uid, item))
+        await self.enqueue(chat, uid, item)
         if busy:
             await msg.reply_text(f"⏳ Queued (position {self.queue.qsize()}). One task at a time.", **QUOTE)
+
+    # ---- in-flight journal
+    def record(self, chat, uid, item):
+        """Journal entry of one task: plain JSON, keeps the user's own text and downloaded file paths only."""
+        text = item.get("text") or ""
+        prompt = item.get("orig_prompt") or item.get("prompt") or ""
+        prompt, text = prompt[:MAX_RECORD_CHARS], text[:MAX_RECORD_CHARS]
+        return {"chat": chat, "uid": uid, "mode": item.get("mode", "agent"), "prompt": prompt,
+                "text": text, "user_text": (text or prompt)[:200], "images": [str(p) for p in item.get("images") or []],
+                "session_id": item.get("session_id") or self.sessions.get(chat), "started": journalmod.now_iso(), "msg_id": item.get("msg_id"),
+                "jid": item.get("jid"), "save": bool(item.get("save")), "resume_count": int(item.get("resume_count", 0))}
+
+    async def enqueue(self, chat, uid, item):
+        item.setdefault("jid", uuid.uuid4().hex)
+        item.setdefault("uid", uid)
+        if not item.get("save"):   # memory-save follow-ups are not worth resuming
+            self.journal.queue_add(self.name, chat, self.record(chat, uid, item))
+        await self.queue.put((chat, uid, item))
+
+    def item_from(self, rec, resumed=False):
+        item = {"mode": rec.get("mode", "agent"), "prompt": rec.get("prompt", ""), "text": rec.get("text", ""),
+                "images": [Path(p) for p in rec.get("images") or []], "msg_id": rec.get("msg_id"),
+                "uid": rec.get("uid"), "save": bool(rec.get("save")), "resume_count": int(rec.get("resume_count", 0))}
+        if resumed:
+            item["resume_count"] += 1
+            if rec.get("session_id") and item["mode"] != "chat":
+                item["session_id"] = rec["session_id"]   # the run continues the recorded session, even after /new
+            if item["mode"] != "chat":
+                item["orig_prompt"] = item["prompt"]
+                item["prompt"] = RESUME_PREFIX + item["prompt"]
+        return item
+
+    async def offer_resume(self):
+        """After a start: tell the user's private chat what the restart interrupted (needs no unlock to send)."""
+        if self._offered:
+            return
+        self._offered = True
+        self.interrupted = self.journal.recover(self.name)
+        for chat, p in sorted(self.interrupted.items()):
+            if not self.auth.is_allowed(chat):
+                continue
+            task, queue = p.get("task"), p.get("queue") or []
+            lines = []
+            if task:
+                try:
+                    hhmm = f"{datetime.fromisoformat(task['started']):%H:%M}"
+                except (KeyError, ValueError):
+                    hhmm = "?"
+                twice = " (interrupted twice)" if int(task.get("resume_count", 0)) >= 1 else ""
+                lines.append(f"⚠️ Restarted while I was working on: “{task.get('user_text', '')}” (started {hhmm}){twice}. "
+                             "Send /resume to continue or /drop to forget it.")
+            else:
+                lines.append("⚠️ Restarted with queued messages. Send /resume to run them or /drop to forget them.")
+            if queue:
+                lines.append(f"Also waiting: {len(queue)} queued message(s).")
+                lines += [f"- {(r.get('user_text') or '')[:60]}" for r in queue]
+            try:
+                await self.send(chat, "\n".join(lines))
+            except Exception as e:
+                log.warning("[%s] resume offer to %s failed: %s", self.name, chat, type(e).__name__)
 
     async def command(self, update, cmd, arg, uid, chat):
         msg = update.effective_message
@@ -342,6 +439,19 @@ class BotService:
         elif cmd in ("exit", "new"):
             self.reset_session(chat)
             await msg.reply_text("Context cleared.")
+        elif cmd == "back":
+            if self.runner.running:
+                await msg.reply_text("Busy: wait until the current task finishes, then send /back again.")
+                return
+            p = self.parked.pop(chat, None)
+            if not p:
+                await msg.reply_text("Nothing to go back to.")
+                return
+            self.sessions[chat], e = p["sid"], p["ctx"]
+            e["last"] = self.wall()   # do not trip the idle reset again on the next message
+            self.ctx[chat] = e
+            self.save_state()
+            await msg.reply_text(ctxinfo.back_notice(e.get("tokens")))
         elif cmd in ("modelstart", "qwenstart") and self.qwen:
             await self.qwen_start(chat)
         elif cmd in ("modelstop", "qwenstop") and self.qwen:
@@ -354,12 +464,32 @@ class BotService:
                                      else f"Stop command ran but {self.display} still answers.")
             except LocalModelError as e:
                 await self.say(msg, f"⚠️ {e}")
+        elif cmd == "resume":
+            if self.runner.running or self.current or not self.queue.empty():
+                await msg.reply_text("Busy: wait until the current task finishes, then send /resume again.")
+                return
+            p = self.journal.take_pending(self.name, chat)
+            self.interrupted.pop(chat, None)
+            if not p:
+                await msg.reply_text("Nothing to resume.")
+                return
+            task, queue = p.get("task"), p.get("queue") or []
+            if task:
+                await self.enqueue(chat, task.get("uid") or uid, self.item_from(task, resumed=True))
+            for r in queue:
+                await self.enqueue(chat, r.get("uid") or uid, self.item_from(r))
+            await msg.reply_text("Resuming." + (f" {len(queue)} queued message(s) follow." if queue and task else ""))
+        elif cmd == "drop":
+            self.journal.take_pending(self.name, chat)
+            self.interrupted.pop(chat, None)
+            await msg.reply_text("Dropped.")
         elif cmd == "stop":
             clear_all = arg.lower() == "all"
             dropped = 0
             if clear_all:
                 while not self.queue.empty():
-                    self.queue.get_nowait()
+                    c, _u, it = self.queue.get_nowait()
+                    self.journal.discard(self.name, c, it.get("jid"))
                     dropped += 1
             killed = self.runner.stop()
             n = self.queue.qsize()
@@ -416,11 +546,64 @@ class BotService:
         await f.download_to_drive(path)
         return path
 
+    async def process_video(self, msg, path):
+        """Frames + transcript for a downloaded video. Returns (frame paths, prompt suffix). Never raises."""
+        frames, transcript, note, dur = [], "", None, None
+        status = None
+        try:
+            status = await msg.reply_text("🎬 Processing video…")
+        except Exception:
+            pass
+        try:
+            if not await asyncio.to_thread(videomod.have_ffmpeg):
+                note = "ffmpeg not found: only the file is passed on"
+            else:
+                dur = await asyncio.to_thread(videomod.probe, path)
+                n = videomod.frame_count(dur, self.g.get("video_frames", 4))
+                if n:
+                    frames = await asyncio.to_thread(videomod.extract_frames, path, path.parent, n, dur)
+                if self.g.get("video_transcribe", True):
+                    wav = await asyncio.to_thread(videomod.extract_audio, path, path.parent)
+                    if wav:
+                        try:
+                            transcript = await media.transcribe(wav, self.g["whisper_model"])
+                        except ImportError:
+                            note = "voice not enabled: no transcript"
+                        except Exception as e:
+                            log.warning("[%s] video transcription failed: %s", self.name, type(e).__name__)
+                        finally:
+                            wav.unlink(missing_ok=True)
+        except Exception:
+            log.exception("[%s] video processing failed", self.name)
+        if status:
+            try:
+                await status.delete()
+            except Exception:
+                pass
+        head = " · ".join(p for p in (
+            videomod.fmt_duration(dur) if dur else "",
+            f"{len(frames)} frame{'s' if len(frames) != 1 else ''}" if frames else "") if p)
+        text = ("🎬 " + (head or "video received") + (f"\n🎙️ {transcript}" if transcript else "")
+                + (f"\n{note}" if note else ""))
+        try:
+            await self.say(msg, text)
+        except Exception as e:
+            log.warning("[%s] video summary reply failed: %s", self.name, type(e).__name__)
+        extra = ""
+        if transcript:
+            extra += f"\nTranscript of the audio: {transcript}"
+        if frames:
+            extra += "\nStill frames (in order): " + ", ".join(str(f) for f in frames)
+        return frames, extra
+
     async def build_prompt(self, update, ctx, text):
         """Download/transcribe the message and decide the mode. Returns a dict
         {mode, prompt (for the agent), text (for chat), images} or None."""
         msg = update.effective_message
         images, has_file, path, caption = [], False, None, text
+        vid = (getattr(msg, "video", None) or getattr(msg, "video_note", None)
+               or getattr(msg, "animation", None))
+        extra = ""
         try:
             if msg.voice or msg.audio:
                 m = msg.voice or msg.audio
@@ -438,6 +621,13 @@ class BotService:
                     return None
                 await self.say(msg, f"🎙️ {tr}")
                 caption, path = tr, None
+            elif vid:
+                if (getattr(vid, "file_size", None) or 0) > MAX_DOWNLOAD:
+                    await msg.reply_text("🎬 Video is too big for Telegram bots (max 20 MB). Send a shorter clip.")
+                    return None
+                path = await self.download(ctx, vid.file_id, getattr(vid, "file_name", None) or "video.mp4")
+                images, extra = await self.process_video(msg, path)
+                has_file = True
             elif msg.photo:
                 path = await self.download(ctx, msg.photo[-1].file_id, "photo.jpg")
                 images = [path]
@@ -450,7 +640,10 @@ class BotService:
                     has_file = True
         except Exception as e:
             log.exception("[%s] media handling failed", self.name)
-            await self.say(msg, f"Media handling failed: {e}")
+            if "too big" in str(e).lower():
+                await self.say(msg, "🎬 Video is too big for Telegram bots (max 20 MB). Send a shorter clip.")
+            else:
+                await self.say(msg, f"Media handling failed: {e}")
             return None
         if not caption and not path:
             return None
@@ -461,7 +654,9 @@ class BotService:
                                            self.agent_triggers)
         else:
             mode, caption = "agent", caption or ""
-        if images:
+        if vid:
+            prompt = f"{caption or 'Look at this video'}\n\nVideo file: {path}{extra}"
+        elif images:
             prompt = f"{caption or 'Look at this image'}\n\nImage file: {path}"
         elif has_file:
             prompt = f"{caption or 'Look at this file'}\n\nFile: {path}"
@@ -473,14 +668,28 @@ class BotService:
     async def work(self):
         while True:
             chat, uid, item = await self.queue.get()
+            if self.shutting_down:   # leave it in the journal queue for /resume
+                return
             reply_to = item.get("msg_id")
             item.setdefault("uid", uid)
+            item.setdefault("jid", uuid.uuid4().hex)
+            jid = item["jid"]
             try:
                 if not self.auth.is_unlocked(uid):
+                    self.journal.discard(self.name, chat, jid)
                     await self.send(chat, "🔒 Locked; queued task dropped.", reply_to)
                     continue
+                self.journal.start(self.name, chat, self.record(chat, uid, item))
                 try:
                     await self.run_one(chat, item)
+                    if not self.shutdown_killed:   # only a run killed by the shutdown keeps its record
+                        self.journal.finish(self.name, chat, jid)
+                except asyncio.CancelledError:
+                    raise   # cancelled (shutdown): the record stays
+                except BaseException:
+                    if not self.shutdown_killed:
+                        self.journal.finish(self.name, chat, jid)
+                    raise
                 finally:
                     self.auth.touch(uid)   # a long task counts as activity: the idle lock must not drop what is queued
             except Exception:
@@ -509,7 +718,8 @@ class BotService:
                     await self.run_task(chat, prompt, None, "(automatic memory save)")
                     self.last_mode[chat] = "chat"
                 else:
-                    await self.run_task(chat, prompt, item.get("msg_id"), item["prompt"])
+                    await self.run_task(chat, prompt, item.get("msg_id"), item.get("orig_prompt") or item["prompt"],
+                                        session_id=item.get("session_id"))
         finally:
             if self.qwen:
                 self.qwen.busy -= 1
@@ -531,7 +741,10 @@ class BotService:
         text = item["text"] or "Look at this image"
         content = text
         if item["images"]:
-            content = [{"type": "text", "text": text}] + [chatmod.image_part(p) for p in item["images"]]
+            imgs = item["images"]
+            if len(imgs) > MAX_CHAT_IMAGES:   # video frames: the local model gets only the first and the middle one
+                imgs = [imgs[0], imgs[len(imgs) // 2]]
+            content = [{"type": "text", "text": text}] + [chatmod.image_part(p) for p in imgs]
         messages = self.chats.messages(chat, system, content)
         t0 = time.monotonic()
         typing = asyncio.create_task(self._typing_loop(chat))   # "typing…" stays visible for the whole wait
@@ -562,8 +775,8 @@ class BotService:
             reply += "\n\n" + (self.cfg["memory"].get("notice_text") or settings.DEFAULT_MEMORY_NOTICE)
         await self.send_answer(chat, reply, reply_to)
         if saving:
-            await self.queue.put((chat, item["uid"], {"mode": "agent", "prompt": self.cfg["memory"]["save_prompt"], "text": "",
-                                                       "images": [], "save": True}))
+            await self.enqueue(chat, item["uid"], {"mode": "agent", "prompt": self.cfg["memory"]["save_prompt"], "text": "",
+                                                       "images": [], "save": True})
         if notify_trim:
             await self.send(chat, ctxinfo.trimmed_notice(self.chats.max_messages))
 
@@ -581,11 +794,18 @@ class BotService:
         lines = [head] + ([tool_line] if tool_line else []) + list(sub_lines) + ([f"✓ {done} done"] if done else [])
         return "\n".join(lines)
 
-    async def run_task(self, chat, prompt, reply_to=None, user_text=None):
+    async def run_task(self, chat, prompt, reply_to=None, user_text=None, session_id=None):
         bot = self.app.bot
         self.current = (chat, prompt[:60].replace("\n", " "))
         self.runner.cwd = self.cwd_for(chat)
-        prev_sid = self.sessions.get(chat)
+        prev_sid = session_id or self.sessions.get(chat)
+        idle = self.idle_reset_due(chat) if session_id is None and prev_sid else None
+        if idle is not None:   # the cache expired: resuming would re-read the whole session at full price
+            tokens = self.ctx[chat].get("tokens")
+            self.parked[chat] = {"sid": self.sessions.pop(chat), "ctx": self.ctx.pop(chat)}
+            prev_sid = None
+            self.save_state()
+            await self.send(chat, ctxinfo.idle_reset_notice(idle, tokens), reply_to)
         if self.qwen and self.cold_start and prev_sid:
             tokens = (self.ctx.get(chat) or {}).get("tokens") or 0
             if tokens >= ctxinfo.LARGE_SESSION_TOKENS:
@@ -642,6 +862,7 @@ class BotService:
             if sid != prev_sid:
                 self.ctx.pop(chat, None)     # a new session id: forget flags/usage of the old one
             self.sessions[chat] = sid
+            self.ctx_entry(chat)["last"] = self.wall()
             if pct is not None:
                 e = self.ctx_entry(chat)
                 warned = set(e["warned"])
@@ -744,6 +965,7 @@ class BotService:
         if self.pin_enabled:
             self.pin_active = True
             self.pin_task = asyncio.create_task(self.pin_loop())
+        await self.offer_resume()
 
     async def announce_online(self):
         """Tell every private chat that has a persisted session/history that the context survived the restart.
@@ -760,12 +982,14 @@ class BotService:
                 log.warning("[%s] startup notice to %s failed: %s", self.name, chat, type(e).__name__)
 
     async def stop(self):
+        self.shutting_down = True
         if self.app and self.runner.running and self.current:
             try:
-                await asyncio.wait_for(self.app.bot.send_message(
-                    self.current[0], "⚠️ Bridge restarting, please resend your last message"), 5)
+                await asyncio.wait_for(self.app.bot.send_message(self.current[0], RESTART_NOTICE), 5)
             except Exception:
                 pass
+        if self.runner.running:
+            self.shutdown_killed = True
         self.runner.stop()
         if self.worker:
             self.worker.cancel()
@@ -804,6 +1028,7 @@ async def main():
     idle_task = asyncio.create_task(qwen.idle_loop()) if qwen else None
     inbox_task = asyncio.create_task(housekeeping.inbox_loop(settings.INBOX, float(g.get("inbox_retention_days", 7))))
     store = StateStore(settings.STATE_DIR / "sessions.json")
+    jrn = journalmod.Journal(settings.STATE_DIR / "inflight.json")
     services = {}
     warned = set()
     try:
@@ -824,7 +1049,7 @@ async def main():
                     warned_once(warned, name, f"[{name}] {bcfg['token_env']} is missing in "
                                 f"{settings.STATE_DIR / '.env'}; waiting (re-checking every 60 s)")
                     continue
-                svc = BotService(name, bcfg, token, auth, g, qwen, store=store, local_url=cfg["local_model"].get("url"))
+                svc = BotService(name, bcfg, token, auth, g, qwen, store=store, local_url=cfg["local_model"].get("url"), journal=jrn)
                 try:
                     await svc.start()
                     services[name] = svc

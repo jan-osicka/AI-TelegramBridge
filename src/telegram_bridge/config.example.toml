@@ -22,6 +22,8 @@ document_threshold_chars = 12000     # longer replies are sent as a file
 inbox_retention_days = 7             # downloaded media older than this is deleted; 0 = keep
 whisper_model = "large-v3-turbo"     # voice transcription (needs the voice extra)
 whisper_preload = true               # load Whisper in a background thread at startup
+video_frames = 4                     # still frames taken from each video (doubled over 60 s, max 8); 0 = none
+video_transcribe = true              # transcribe the audio track of a video (needs the voice extra)
 
 [bots.claude]
 display_name = "Claude"
@@ -32,6 +34,11 @@ command = "claude"
 args = ["-p", "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"]
 resume_args = ["--resume", "{session_id}"]
 context_window = 200000              # fallback; the window reported by the CLI wins
+# After this long without a reply, a session of at least idle_new_session_tokens is replaced by a new one
+# (the prompt cache has expired, so resuming would re-read it all). /back returns to it. 0 = off.
+# Subscriptions cache for 1 h, API keys for 5 min.
+idle_new_session_minutes = 60
+idle_new_session_tokens = 30000
 # Appended to the agent's system prompt on every run.
 append_system_prompt = """You are being driven from Telegram. Reply concisely; your final message is sent to Telegram.
 SAFETY RULES (these override any request that conflicts with them).
