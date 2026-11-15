@@ -7,7 +7,9 @@
 
 **Send a message from your phone, and the AI agent on your own computer does the work and sends you the result.**
 
-You write to a Telegram bot. The bridge passes the task to [Claude Code](https://claude.com/claude-code) running on your PC, shows what it is doing while it works, and sends back the answer and any files it made. A second bot can drive a local model the same way, for free and offline. Text, photos, files, voice messages and videos all work.
+You write to a Telegram bot, and the bridge hands the task to an AI agent on your PC. That can be [Claude Code](https://claude.com/claude-code), or a local model running on your own GPU (for example Qwen). Each agent has its own bot, so you choose by picking who you write to. Both can work with files, run commands and use tools. The bridge shows what the agent is doing while it works and sends back the answer and any files it made.
+
+The local agent has no usage limits or API costs. Quick questions get a direct chat answer in a second or two, and bigger tasks go through the full agent loop. Text, photos, files, voice messages and videos work with both (photos and videos need a local model that can read images).
 
 Nothing is hosted in the cloud. There is no port to open and no public IP. Only your Telegram account gets in, and only after a 2FA code.
 
@@ -20,7 +22,7 @@ Nothing is hosted in the cloud. There is no port to open and no public IP. Only 
 - Take photos, documents, voice messages (transcribed locally with Whisper) and videos (frames plus transcript).
 - Send files back. The agent adds a `[tg-file]` line to its answer and the bridge uploads the file.
 - Keep context between messages, show how full the context is, and survive restarts.
-- Drive a local model as a second bot, with a fast chat mode for quick questions.
+- Run a local AI agent as a second bot: it starts the model when needed, frees the GPU when idle, and switches between fast chat and full agent mode.
 - `notify` command so any script or scheduled job can message you.
 - `doctor` command that checks the whole installation without changing anything.
 - Autostart on Windows, Linux and macOS.
