@@ -1,0 +1,105 @@
+<!doctype html>
+<html><head><meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { width: 1200px; background: #eef1f5; font-family: "Segoe UI", system-ui, sans-serif; padding: 36px 40px 30px; }
+  .row { display: flex; gap: 32px; justify-content: center; }
+  .col { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .label { font-size: 15px; font-weight: 600; color: #3b4452; letter-spacing: .2px; }
+  .label b { display: inline-flex; width: 24px; height: 24px; border-radius: 50%; background: #2f6fde; color: #fff;
+             font-size: 13px; align-items: center; justify-content: center; margin-right: 8px; }
+  .phone { width: 352px; height: 640px; border-radius: 34px; background: #111; padding: 10px;
+           box-shadow: 0 18px 40px rgba(20,30,50,.18), 0 2px 6px rgba(20,30,50,.12); }
+  .screen { width: 100%; height: 100%; border-radius: 26px; overflow: hidden; display: flex; flex-direction: column;
+            background: #dfe7ee; }
+  .bar { background: #fff; padding: 12px 16px 10px; display: flex; align-items: center; gap: 10px;
+         border-bottom: 1px solid #e3e7ec; }
+  .avatar { width: 36px; height: 36px; border-radius: 50%; background: linear-gradient(135deg,#d97757,#b8553a);
+            color: #fff; display: flex; align-items: center; justify-content: center; font-weight: 700; font-size: 15px; }
+  .name { font-weight: 600; font-size: 15px; color: #1c2330; }
+  .sub { font-size: 12px; color: #6b7685; }
+  .pin { background: #fff; border-bottom: 1px solid #e3e7ec; padding: 7px 16px; font-size: 12px; color: #3b4452;
+         border-left: 3px solid #2f6fde; }
+  .pin small { display: block; color: #2f6fde; font-weight: 600; font-size: 11px; }
+  .chat { flex: 1; padding: 14px 12px; display: flex; flex-direction: column; gap: 8px; justify-content: flex-end; }
+  .msg { max-width: 86%; padding: 8px 11px 6px; border-radius: 14px; font-size: 13.5px; line-height: 1.42;
+         color: #1c2330; box-shadow: 0 1px 1px rgba(0,0,0,.08); white-space: pre-line; }
+  .in { background: #fff; align-self: flex-start; border-bottom-left-radius: 4px; }
+  .out { background: #d6f0c8; align-self: flex-end; border-bottom-right-radius: 4px; }
+  .time { display: block; text-align: right; font-size: 10.5px; color: #8a95a3; margin-top: 2px; }
+  .out .time { color: #5f9a4e; }
+  .mono { font-size: 12.5px; color: #3b4452; }
+  .muted { color: #6b7685; font-size: 12px; }
+  .file { display: flex; gap: 10px; align-items: center; padding: 4px 0 2px; }
+  .ficon { width: 40px; height: 40px; border-radius: 50%; background: #2f6fde; color: #fff; display: flex;
+           align-items: center; justify-content: center; font-size: 11px; font-weight: 700; }
+  .fname { font-weight: 600; font-size: 13px; }
+  .voice { display: flex; align-items: center; gap: 8px; white-space: normal; }
+  .play { width: 30px; height: 30px; border-radius: 50%; background: #4fae4e; color: #fff; display: flex;
+          align-items: center; justify-content: center; font-size: 12px; }
+  .wave { display: flex; gap: 2px; align-items: center; height: 22px; }
+  .wave i { width: 3px; background: #4fae4e; border-radius: 2px; display: block; }
+  .input { background: #fff; padding: 11px 16px; font-size: 13px; color: #9aa4b1; border-top: 1px solid #e3e7ec; }
+  .caption { text-align: center; font-size: 12.5px; color: #7a8594; margin-top: 22px; }
+</style></head>
+<body>
+<div class="row">
+
+  <div class="col">
+    <div class="label"><b>1</b>Unlock with 2FA, then ask</div>
+    <div class="phone"><div class="screen">
+      <div class="bar"><div class="avatar">AI</div><div><div class="name">Claude bot</div><div class="sub">bot</div></div></div>
+      <div class="pin"><small>Pinned message</small>🔓 Unlocked until 18:30 (idle lock after 3 h without messages)</div>
+      <div class="chat">
+        <div class="msg in">🔒 Locked. Send /unlock &lt;code from authenticator&gt;.<span class="time">15:28</span></div>
+        <div class="msg in">🔓 Unlocked. Valid until 18:30 15.11.<span class="time">15:30</span></div>
+        <div class="msg out voice"><div class="play">▶</div><div class="wave">
+          <i style="height:6px"></i><i style="height:12px"></i><i style="height:18px"></i><i style="height:10px"></i><i style="height:20px"></i><i style="height:14px"></i><i style="height:8px"></i><i style="height:16px"></i><i style="height:22px"></i><i style="height:12px"></i><i style="height:7px"></i><i style="height:15px"></i><i style="height:19px"></i><i style="height:9px"></i><i style="height:13px"></i><i style="height:6px"></i><i style="height:11px"></i><i style="height:17px"></i><i style="height:8px"></i><i style="height:5px"></i>
+        </div><span class="muted">0:11</span><span class="time" style="margin-left:auto">15:31 ✓✓</span></div>
+        <div class="msg in">🎙️ Go through the three newest PDFs in my Downloads folder. Make me a one-page summary with prices, payment terms and deadlines, send it as a PDF and tell me which offer is the cheapest.<span class="time">15:31</span></div>
+      </div>
+      <div class="input">Message</div>
+    </div></div>
+  </div>
+
+  <div class="col">
+    <div class="label"><b>2</b>Watch it work, live</div>
+    <div class="phone"><div class="screen">
+      <div class="bar"><div class="avatar">AI</div><div><div class="name">Claude bot</div><div class="sub">bot</div></div></div>
+      <div class="pin"><small>Pinned message</small>🔓 Unlocked until 18:30 (idle lock after 3 h without messages)</div>
+      <div class="chat">
+        <div class="msg in">🎙️ Go through the three newest PDFs in my Downloads folder. Make me a one-page summary with prices, payment terms and deadlines, send it as a PDF and tell me which offer is the cheapest.<span class="time">15:31</span></div>
+        <div class="msg in"><span>⏳ Claude is working… 1m 12s · step 9</span>
+<span class="mono">🔧 Bash: ls -t Downloads/*.pdf</span>
+<span class="mono">↳ Nordline offer · 0:41 · 🔧 Read: nordline.pdf</span>
+<span class="mono">↳ Baltic offer · 0:38 · 🔧 Grep: payment terms</span>
+<span class="mono">↳ Contract · 0:35 · 🔧 Read: contract.pdf</span><span class="time">15:32</span></div>
+        <div class="msg in muted" style="font-size:12px">The message updates in place while the agent and its subagents work.</div>
+      </div>
+      <div class="input">Message</div>
+    </div></div>
+  </div>
+
+  <div class="col">
+    <div class="label"><b>3</b>Get the answer and the file</div>
+    <div class="phone"><div class="screen">
+      <div class="bar"><div class="avatar">AI</div><div><div class="name">Claude bot</div><div class="sub">bot</div></div></div>
+      <div class="pin"><small>Pinned message</small>🔓 Unlocked until 18:30 (idle lock after 3 h without messages)</div>
+      <div class="chat">
+        <div class="msg in"><b>Summary of the 3 documents</b>
+• <b>Nordline:</b> 12 400 EUR, 30 days net, valid to 30.11.
+• <b>Baltic Supply:</b> 11 850 EUR, 14 days net, valid to 5.12.
+• <b>Framework contract:</b> renewal notice by 31.12.
+
+Cheapest: <b>Baltic Supply</b>, but with shorter payment terms.
+
+<span class="muted">· 18% context · $0.21</span><span class="time">15:34</span></div>
+        <div class="msg in"><div class="file"><div class="ficon">PDF</div><div><div class="fname">summary.pdf</div><div class="muted">86 KB · One-page summary</div></div></div><span class="time">15:34</span></div>
+      </div>
+      <div class="input">Message</div>
+    </div></div>
+  </div>
+
+</div>
+<div class="caption">Illustration of a typical session, built from the bridge's real message formats.</div>
+</body></html>

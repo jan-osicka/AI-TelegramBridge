@@ -11,7 +11,7 @@ You write to a Telegram bot. The bridge passes the task to [Claude Code](https:/
 
 Nothing is hosted in the cloud. There is no port to open and no public IP. Only your Telegram account gets in, and only after a 2FA code.
 
-<!-- Demo: add screenshots or a GIF here, e.g. docs/demo.gif -->
+![A typical session: unlock with 2FA, live progress, answer with a PDF](docs/demo.png)
 
 ## What it can do
 
