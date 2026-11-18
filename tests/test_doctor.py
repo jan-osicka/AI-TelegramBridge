@@ -192,3 +192,17 @@ def test_non_table_sections_do_not_abort(home, monkeypatch, capsys, body):
     monkeypatch.setattr(doctor, "Probes", lambda: p)
     assert cli.main(["doctor"]) == 1
     assert "checks:" in capsys.readouterr().out
+
+
+def test_doctor_reports_voice_replies(home):
+    cfg = (home / "config.toml").read_text()
+    (home / "config.toml").write_text(cfg + '[bots.alpha.voice]\nvoices = { en = "en-VOICE" }\n')
+    checks = by_name(doctor.run_checks(False, probes=probes()))
+    assert checks["voice replies"].status == "OK" and checks["voice ffmpeg"].status == "OK"
+    assert "en=en-VOICE" in checks["voices alpha"].detail
+    checks = by_name(doctor.run_checks(False, probes=probes(importable=lambda n: n != "edge_tts", which=lambda n: None)))
+    assert checks["voice replies"].status == "WARN" and checks["voice ffmpeg"].status == "WARN"
+
+
+def test_doctor_silent_without_voice_table(home):
+    assert not any(c.name.startswith("voice") and c.name != "voice" for c in doctor.run_checks(False, probes=probes()))

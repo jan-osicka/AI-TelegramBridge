@@ -106,3 +106,44 @@ def test_url_sensitive_masked(s):
     out, n = redact(s)
     assert n == 1 and MASK in out and "abc123def456" not in out and "xyz789" not in out
     assert out.startswith("https://x.com/cb")
+
+
+SEED = ("abandon ability able about above absent absorb abstract absurd abuse access accident "
+        "account accuse achieve acid acoustic acquire across act action actor actress actual")
+
+
+@pytest.mark.parametrize("s", [
+    "my seed: " + " ".join(SEED.split()[:12]) + " keep it safe",
+    "Seed: " + SEED,
+    "\n".join(f"{i}. {w}" for i, w in enumerate(SEED.split()[:12], 1)),
+    '["' + '", "'.join(SEED.upper().split()[:12]) + '"]',
+])
+def test_masks_seed_phrase(s):
+    out, n = redact(s)
+    assert n == 1 and MASK in out
+    assert not any(w in out.lower() for w in ("abandon", "absurd", "accident"))
+
+
+@pytest.mark.parametrize("s", [
+    " ".join(SEED.split()[:11]),   # 11 words: below the limit
+    "I want to build a simple bridge so my phone can reach the local agent from outside the house.",
+    "Abandon ability able about above absent, then the rest: absorb abstract absurd abuse access accident.",
+])
+def test_seed_no_false_positive(s):
+    assert redact(s) == (s, 0)
+
+
+@pytest.mark.parametrize("s", [
+    "[" + ",".join(["false"] * 20) + "]",
+    "where: top-left, top, top-right, bottom-left, bottom, bottom-right, left, right, top, bottom, left, right",
+    "use_index_order=use_index_order, use_field_number=use_field_number, descriptor_pool=descriptor_pool",
+    "Please remove this job Please update this job Please promote this job Wrong location Wrong category",
+])
+def test_seed_no_false_positive_code(s):
+    assert redact(s) == (s, 0)
+
+
+def test_seed_gap_no_backtracking():
+    # A long digit run between two wordlist words must not make the gap regex backtrack.
+    s = "abandon " + "1" * 60 + "! ability"
+    assert redact(s) == (s, 0)

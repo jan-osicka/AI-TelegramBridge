@@ -10,14 +10,9 @@ def percent(tokens, window):
     return int(round(100 * tokens / window))
 
 
-def footer(pct, cost=None, show_cost=False):
-    """`· 42% context` plus ` · $0.18` (Claude only, never for the local model). Empty if the percentage is unknown."""
-    if pct is None:
-        return ""
-    s = f"· {pct}% context"
-    if show_cost and cost and cost > 0:
-        s += f" · ${cost:.2f}"
-    return s
+def footer(pct):
+    """`· 42% context`, or empty if the percentage is unknown. No cost: on a subscription it means nothing."""
+    return "" if pct is None else f"· {pct}% context"
 
 
 def warnings(pct, warned):

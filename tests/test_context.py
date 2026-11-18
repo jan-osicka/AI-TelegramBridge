@@ -114,10 +114,8 @@ def test_config_has_context_windows():
 def test_percent_and_footer():
     assert ctxinfo.percent(84000, 200000) == 42 and ctxinfo.percent(None, 200000) is None
     assert ctxinfo.percent(5, 0) is None
-    assert ctxinfo.footer(42, 0.18, True) == "· 42% context · $0.18"
-    assert ctxinfo.footer(42, 0.18, False) == "· 42% context"
-    assert ctxinfo.footer(42, 0, True) == "· 42% context" and ctxinfo.footer(42, None, True) == "· 42% context"
-    assert ctxinfo.footer(None, 1.0, True) == ""
+    assert ctxinfo.footer(42) == "· 42% context"
+    assert ctxinfo.footer(None) == ""
 
 
 def test_warnings_fire_once_per_level():

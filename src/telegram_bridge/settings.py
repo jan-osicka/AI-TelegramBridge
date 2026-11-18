@@ -67,6 +67,33 @@ def _normalise_memory(bot):
         bot[key] = [str(x) for x in (bot.get(key) or [])]
 
 
+def _normalise_voice(bot):
+    """[bots.X.voice]: edge-tts voices per language. bot["voice"] is None (off) or {voices, default_lang};
+    bot["voice_problems"] lists what was wrong (shown by doctor)."""
+    raw = bot.get("voice")
+    bot["voice"], bot["voice_problems"] = None, []
+    if raw is None:
+        return
+    problems = []
+    if not isinstance(raw, dict):
+        raw, problems = {}, ["[voice] is not a table"]
+    voices = raw.get("voices")
+    if not isinstance(voices, dict):
+        voices = {}
+        problems.append("voices must be a table such as { en = \"en-US-AndrewNeural\" }")
+    good = {str(k).strip().lower(): v.strip() for k, v in voices.items() if isinstance(v, str) and v.strip()}
+    if len(good) != len(voices):
+        problems.append("some voices are not non-empty strings")
+    default = str(raw.get("default_lang") or "en").strip().lower()
+    if good and default not in good:
+        problems.append(f"default_lang {default!r} has no voice; using {next(iter(good))!r}")
+        default = next(iter(good))
+    if not good:
+        problems.append("no usable voices; voice replies are off")
+    bot["voice"] = {"voices": good, "default_lang": default} if good else None
+    bot["voice_problems"] = problems
+
+
 def _normalise(cfg):
     g = cfg.setdefault("general", {})
     lm = dict(cfg.get("local_model") or cfg.get("qwen_server") or {})
@@ -85,6 +112,7 @@ def _normalise(cfg):
         bot["display_name"] = bot.get("display_name") or key.capitalize()
         bot["mode"] = bot.get("mode") or "agent"
         _normalise_memory(bot)
+        _normalise_voice(bot)
         bot["chat_model"] = bot.get("chat_model") or (bot.get("env") or {}).get("ANTHROPIC_MODEL") or "local"
     return cfg
 

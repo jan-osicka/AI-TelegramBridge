@@ -24,6 +24,7 @@ from . import progress
 from . import redaction, statuspin
 from . import settings
 from . import video as videomod
+from . import voice as voicemod
 from .auth import Auth
 from .localmodel import LocalModelError, LocalModelManager
 from .runner import Runner
@@ -45,6 +46,9 @@ COMMANDS = [
     ("cwd", "Show or set working directory"),
     ("help", "List commands"),
 ]
+VOICE_COMMANDS = [
+    ("voice", "Voice replies: /voice on, /voice off"),
+]
 LOCAL_COMMANDS = [
     ("modelstart", "Start (preload) the local model server"),
     ("modelstop", "Stop the local model server now"),
@@ -60,7 +64,7 @@ QUOTE = {"do_quote": True, "allow_sending_without_reply": True}   # reply_text k
 
 
 def commands_for(cfg):
-    return COMMANDS + (LOCAL_COMMANDS if cfg.get("needs_local_model") else [])
+    return COMMANDS + (VOICE_COMMANDS if cfg.get("voice") else []) + (LOCAL_COMMANDS if cfg.get("needs_local_model") else [])
 
 
 class Redact(logging.Filter):
@@ -155,6 +159,13 @@ class BotService:
             extra = (cfg.get("append_system_prompt") or "").strip()
             sentence = outfiles.convention_sentence(settings.OUTBOX)
             self.cfg = cfg = {**cfg, "append_system_prompt": (extra + " " + sentence).strip()}
+        self.voice_cfg = cfg.get("voice")   # None = voice replies are off for this bot
+        self.voice_on = set()   # chat ids with voice mode on; in memory only, cleared when the session ends
+        if self.voice_cfg:
+            extra = (cfg.get("append_system_prompt") or "").strip()
+            sentence = voicemod.convention_sentence(self.voice_cfg["voices"])
+            self.cfg = cfg = {**cfg, "append_system_prompt": (extra + " " + sentence).strip()}
+            auth.lock_hooks.append(lambda uid: self.voice_on.clear())   # private chats: one user per bot
         self.display = cfg.get("display_name") or name.capitalize()
         self.local_url = local_url or (qwen.url if qwen else None)
         self.qwen = qwen if cfg.get("needs_local_model") else None
@@ -339,6 +350,7 @@ class BotService:
             await ctx.bot.send_message(msg.chat_id, ("🔓 " if ok else "🔒 ") + info +
                                        (f" Valid until {datetime.fromtimestamp(self.auth.expiry(uid)):%H:%M %d.%m.}" if ok else ""))
             if ok:
+                self.voice_on.clear()   # a new session starts with voice mode off
                 await self.update_pin(uid)
             return
         if not self.auth.is_unlocked(uid):
@@ -432,6 +444,8 @@ class BotService:
         msg = update.effective_message
         if cmd in ("help", "start"):
             await msg.reply_text(self.help())
+        elif cmd == "voice":
+            await msg.reply_text(self.voice_command(chat, arg))
         elif cmd == "lock":
             self.auth.lock(uid)
             await msg.reply_text("🔒 Locked.")
@@ -530,6 +544,44 @@ class BotService:
                 await msg.reply_text("Not a directory.")
         else:
             await msg.reply_text("Unknown command.\n" + self.help())
+
+    def voice_command(self, chat, arg):
+        if not self.voice_cfg:
+            return "Voice replies are not configured for this bot (see [bots.<name>.voice] in config.toml)."
+        arg = arg.strip().lower()
+        if arg == "on":
+            self.voice_on.add(chat)
+        elif arg == "off":
+            self.voice_on.discard(chat)
+        elif arg:
+            return "Usage: /voice on, /voice off"
+        return ("🔊 Voice mode is on: replies come as a voice message plus text." if chat in self.voice_on
+                else "🔇 Voice mode is off (text only). It also turns off when the session locks.")
+
+    def voice_split(self, chat, text):
+        """(text without the [tg-voice] block, (lang, spoken text) or None). In voice mode a reply without a
+        block is spoken in a cleaned version of its text."""
+        v = self.voice_cfg
+        if not v or not text:
+            return text, None
+        text, spoken = voicemod.extract(text, v["voices"], v["default_lang"])
+        if spoken is None and chat in self.voice_on and (plain := voicemod.clean_text(text)):
+            spoken = (v["default_lang"], plain)
+        return text, spoken
+
+    async def send_voice(self, chat, spoken, reply_to=None):
+        """Speak (lang, text) as a voice message. Returns None, or a one-line note when it failed; never raises."""
+        lang, text = spoken
+        text = voicemod.cap(redaction.redact(text)[0])
+        try:
+            data = await voicemod.synthesize(text, self.voice_cfg["voices"][lang])
+            await self.app.bot.send_voice(chat, io.BytesIO(data), filename="reply.ogg", **reply_kw(reply_to))
+        except voicemod.VoiceError as e:
+            return voicemod.NOTE_PREFIX + str(e)
+        except Exception as e:
+            log.warning("[%s] sending the voice message failed: %s", self.name, type(e).__name__)
+            return voicemod.NOTE_PREFIX + type(e).__name__
+        return None
 
     def context_status(self, chat):
         c = self.ctx.get(chat) or {}
@@ -714,6 +766,8 @@ class BotService:
                 prompt = item["prompt"]
                 if self.chat_enabled:
                     prompt = chatmod.history_prefix(self.unseen.pop(chat, [])) + prompt
+                if chat in self.voice_on and not item.get("save"):
+                    prompt += "\n\n" + voicemod.VOICE_MODE_NOTE
                 if item.get("save"):   # background memory save: must not make the next chat turn agent-sticky
                     await self.run_task(chat, prompt, None, "(automatic memory save)")
                     self.last_mode[chat] = "chat"
@@ -738,6 +792,8 @@ class BotService:
         reply_to = item.get("msg_id")
         self.current = (chat, item["text"][:60].replace("\n", " "))
         system = chatmod.build_system(self.cfg.get("chat_system_prompt", ""), self.memory_dir())
+        if self.voice_cfg:
+            system += "\n\n" + voicemod.convention_sentence(self.voice_cfg["voices"])
         text = item["text"] or "Look at this image"
         content = text
         if item["images"]:
@@ -746,6 +802,11 @@ class BotService:
                 imgs = [imgs[0], imgs[len(imgs) // 2]]
             content = [{"type": "text", "text": text}] + [chatmod.image_part(p) for p in imgs]
         messages = self.chats.messages(chat, system, content)
+        if chat in self.voice_on:   # the note goes to the model only, not into the saved history
+            last = messages[-1]["content"]
+            note = "\n\n" + voicemod.VOICE_MODE_NOTE
+            last = last + note if isinstance(last, str) else [{**last[0], "text": last[0]["text"] + note}, *last[1:]]
+            messages = [*messages[:-1], {**messages[-1], "content": last}]
         t0 = time.monotonic()
         typing = asyncio.create_task(self._typing_loop(chat))   # "typing…" stays visible for the whole wait
         try:
@@ -760,7 +821,8 @@ class BotService:
         finally:
             typing.cancel()
         log.info("[%s] chat reply in %.1f s (images=%d)", self.name, time.monotonic() - t0, len(item["images"]))
-        reply = reply or "(empty response)"
+        reply, spoken = self.voice_split(chat, reply)
+        reply = reply or ("🔊" if spoken else "(empty response)")
         dropped = self.chats.add_reply(chat, reply, text)
         self.last_mode[chat] = "chat"
         self.unseen.setdefault(chat, []).extend([("user", text), ("assistant", reply)])
@@ -773,6 +835,8 @@ class BotService:
                   and chatmod.wants_save(text, self.save_triggers))
         if saving:   # say it honestly in the same message: the save runs afterwards in the agent
             reply += "\n\n" + (self.cfg["memory"].get("notice_text") or settings.DEFAULT_MEMORY_NOTICE)
+        if spoken and (note := await self.send_voice(chat, spoken, reply_to)):
+            reply = note if reply == "🔊" else reply + "\n\n" + note
         await self.send_answer(chat, reply, reply_to)
         if saving:
             await self.enqueue(chat, item["uid"], {"mode": "agent", "prompt": self.cfg["memory"]["save_prompt"], "text": "",
@@ -873,14 +937,17 @@ class BotService:
             await status.delete()
         except Exception:
             pass
-        final = final or "(empty response)"
+        spoken = None
+        if not is_err:
+            final, spoken = self.voice_split(chat, final)
+        final = final or ("🔊" if spoken else "(empty response)")
         if self.chat_enabled and not is_err:   # chat mode must see agent turns too
             self.chats.add_turn(chat, user_text or prompt, final)
             self.last_mode[chat] = "agent"
             self.save_state()
         if is_err:
             final = "⚠️ " + final
-        footer = ctxinfo.footer(pct, stats.cost_usd, show_cost=not self.cfg.get("needs_local_model"))
+        footer = ctxinfo.footer(pct)
         files = []
         if self.outgoing_files:
             final, items = outfiles.extract(final)
@@ -892,6 +959,8 @@ class BotService:
                 else:
                     files.append((raw, cap))
             final = final or ("📎" if files else "(empty response)")
+        if spoken and (note := await self.send_voice(chat, spoken, reply_to)):
+            final = note if final == "🔊" else final + "\n\n" + note
         await self.send_answer(chat, final, reply_to, footer)
         if files:
             for n in await outfiles.send(bot, chat, files, self.allowed_dirs(), [], reply_to,

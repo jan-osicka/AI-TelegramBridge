@@ -274,6 +274,23 @@ def run_checks(online: bool = False, env: dict | None = None, probes: Probes | N
                     add("ffmpeg", "OK", "on PATH")
                 else:
                     add("ffmpeg", "WARN", "not on PATH", "install ffmpeg (voice messages need it)")
+        with guard("voice replies"):
+            vbots = {n: b for n, b in bots.items() if b.get("voice") or b.get("voice_problems")}
+            if any(b.get("voice") for b in vbots.values()):
+                if probes.importable("edge_tts"):
+                    add("voice replies", "OK", "edge-tts installed")
+                else:
+                    add("voice replies", "WARN", "edge-tts is not installed", "uv sync --extra tts")
+                if probes.which("ffmpeg"):
+                    add("voice ffmpeg", "OK", "on PATH")
+                else:
+                    add("voice ffmpeg", "WARN", "not on PATH", "install ffmpeg (voice replies need it)")
+            for n, b in vbots.items():
+                v, bad = b.get("voice") or {"voices": {}, "default_lang": "-"}, b.get("voice_problems")
+                add(f"voices {n}", "WARN" if bad else "OK",
+                    ", ".join(f"{k}={x}" for k, x in v["voices"].items()) + f" (default {v['default_lang']})"
+                    + (f"; {'; '.join(bad)}" if bad else ""),
+                    f"check [bots.{n}.voice] in config.toml" if bad else "")
 
     try:
         if probes.lock_held(settings.LOCK):

@@ -11,7 +11,10 @@ BS = chr(92)
 PATTERN = re.compile(
     r"(?i)r[o]ok|vio[l]et|janosick[a]|osic[j]a|(?<!third-)part[y]|C:" + re.escape(BS) + "Users" + re.escape(BS) + r"[^" + re.escape(BS) + r"{]+" + re.escape(BS))
 # Narrow allow-list for legitimate third-party words: (relative path, matched text).
-ALLOW = set()
+ALLOW = {  # the public BIP39 wordlist happens to contain these words
+    ("src/telegram_bridge/bip39_english.txt", "part" + "y"),
+    ("src/telegram_bridge/bip39_english.txt", "ro" + "ok"),
+}
 
 
 def _tracked():

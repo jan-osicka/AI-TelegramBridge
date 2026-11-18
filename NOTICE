@@ -1,2 +1,5 @@
 The secret-detection patterns in src/telegram_bridge/redaction.py are adapted from
 Agent2Telegram (https://github.com/petrludwig-collab/Agent2Telegram), MIT licence.
+
+src/telegram_bridge/bip39_english.txt is the English wordlist from BIP-0039
+(https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt), unchanged.

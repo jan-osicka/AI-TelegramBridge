@@ -21,6 +21,7 @@ Nothing is hosted in the cloud. There is no port to open and no public IP. Only 
 - Show live progress while the agent works: the current tool, steps, subagents, elapsed time.
 - Take photos, documents, voice messages (transcribed locally with Whisper) and videos (frames plus transcript).
 - Send files back. The agent adds a `[tg-file]` line to its answer and the bridge uploads the file.
+- Answer by voice (optional). Ask for a spoken answer or turn on `/voice on`, and the reply comes as a Telegram voice message plus the full text.
 - Keep context between messages, show how full the context is, and survive restarts.
 - Run a local AI agent as a second bot: it starts the model when needed, frees the GPU when idle, and switches between fast chat and full agent mode.
 - `notify` command so any script or scheduled job can message you.
@@ -48,14 +49,14 @@ Some design decisions that matter in daily use:
 - **Live subagent view.** When Claude Code delegates work to subagents, the progress message shows each one and what it did last.
 - **Restart without losing work.** The running task and the queue are written to a journal. After a crash or reboot the bridge tells you what was cut off and waits for `/resume` or `/drop`. It never repeats a task on its own.
 - **Local model on demand.** The second bot starts the model server when a task arrives and stops it after 20 minutes idle, so the VRAM is free the rest of the time. Short questions go straight to the chat API and get an answer in a second or two. Tasks that need tools go through the full agent loop.
-- **Secrets never leave by accident.** Every reply, notification and log line is scanned and API keys or tokens are masked. The scan runs before the text is split into Telegram messages, so a secret can't slip through cut in half.
+- **Secrets never leave by accident.** Every reply, notification and log line is scanned and API keys, tokens and wallet seed phrases are masked. The scan runs before the text is split into Telegram messages, so a secret can't slip through cut in half.
 - **Outgoing files are checked after the path is resolved,** so `..`, symlinks and junctions can't get around the outbox rules.
 
 ## How it was built
 
 I built this with Claude Code as a test of how far careful agent work can go on a real tool I use every day.
 
-The bigger changes started as a written spec with goals, non-goals and "anti-goals" (things that count as failure even if the code works, like a safeguard that exists but is never called). Then came an implementation plan split into tasks. Claude Code worked through the tasks with subagents, each change was reviewed against the spec, and the whole branch got a final review before it went live. Tests were written alongside the code: there are now 365, and CI runs them on Windows, Linux and macOS on every push.
+The bigger changes started as a written spec with goals, non-goals and "anti-goals" (things that count as failure even if the code works, like a safeguard that exists but is never called). Then came an implementation plan split into tasks. Claude Code worked through the tasks with subagents, each change was reviewed against the spec, and the whole branch got a final review before it went live. Tests were written alongside the code: there are now about 400, and CI runs them on Windows, Linux and macOS on every push.
 
 A test also checks that no personal data (names, paths, persona prompts) ends up in the repository. Everything personal lives in the user's own config folder.
 
@@ -66,7 +67,7 @@ You need Python 3.12, [uv](https://docs.astral.sh/uv/), Claude Code installed an
 ```bash
 git clone https://github.com/jan-osicka/AI-TelegramBridge
 cd AI-TelegramBridge
-uv sync --extra qr             # add --extra voice for voice messages, --extra cuda on an NVIDIA GPU
+uv sync --extra qr             # add --extra voice for voice messages, --extra tts for spoken replies, --extra cuda on an NVIDIA GPU
 uv run telegram-bridge setup
 ```
 
@@ -114,6 +115,7 @@ All three start `telegram-bridge run --service` from the project virtual environ
 | `/status` | Lock state, running task, session |
 | `/cwd [path]` | Show or set the working folder |
 | `/modelstart`, `/modelstop` | Start or stop the local model server (local-model bot only) |
+| `/voice [on\|off]` | Voice replies for this chat (bots with a `[bots.<name>.voice]` table only) |
 | `/help` | List the commands |
 
 Anything else is a task for the agent. More detail, including chat mode for a local model, is in [USAGE.md](USAGE.md).

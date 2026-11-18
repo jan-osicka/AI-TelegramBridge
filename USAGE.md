@@ -22,6 +22,7 @@ Each bot keeps one pinned message in your private chat that shows whether the br
 | `/resume`, `/drop` | Continue or forget the task that a restart interrupted (see below) |
 | `/status` | Lock state, running task, session |
 | `/cwd [path]` | Show or set the working folder (only inside `allowed_cwd_roots`) |
+| `/voice [on\|off]` | Voice replies for this chat (only for bots with a `[bots.<name>.voice]` table) |
 | `/modelstart`, `/modelstop` | Start or stop the local model (only for bots with `needs_local_model`) |
 | `/help` | List the commands |
 
@@ -30,7 +31,7 @@ Anything else is a task for the agent.
 ## Working with the agent
 
 - While a task runs, one status message is edited with the elapsed time, the current tool and subagents. Messages sent meanwhile wait in a queue.
-- The reply ends with a context line such as `42% context`. The Claude bot also shows the cost of the run.
+- The reply ends with a context line such as `42% context`.
 - Replies longer than `document_threshold_chars` are sent as a file. Other messages are split at Telegram's limit of 4096 characters.
 - Send a photo, document or voice message and the agent gets the file path. Voice is transcribed first when the `voice` extra is installed. Downloads older than `inbox_retention_days` are deleted.
 - Videos, round video notes and GIFs work too, up to the 20 MB limit of Telegram bots. With ffmpeg installed, the bridge takes `video_frames` still frames (doubled for clips over 60 seconds, at most 8) and transcribes the audio when `video_transcribe` is on. The agent gets the video path, the transcript and the frame paths. Without ffmpeg only the file is passed on.
@@ -52,6 +53,33 @@ A bot with `needs_local_model = true` can run in three modes (`mode` in its conf
 Start a message with `!` to force the agent, or with `?` to force chat. Messages with a non-image attachment always go to the agent.
 
 If memory is enabled for the bot (`[bots.<name>.memory]`), the notes in `dir` (`*.md`, `README.md` first, limited in size) are part of the chat system prompt. A message that looks like a save request or states a lasting fact ("remember that...", "my name is...") is answered in chat and then saved by an agent run that follows your `save_prompt`. The reply says so with `notice_text`. With memory off there is no notes summary, no save detection and no save run.
+
+## Voice replies
+
+The agent can answer with a Telegram voice message first and the full text after it. By default replies are text only, even when you send a voice message.
+
+Setup:
+
+1. `uv sync --extra tts` and install ffmpeg (it must be on PATH).
+2. Add a table per bot in `config.toml`:
+
+```toml
+[bots.claude.voice]
+voices = { cs = "cs-CZ-AntoninNeural", sk = "sk-SK-LukasNeural", en = "en-US-AndrewNeural" }
+default_lang = "en"
+```
+
+`voices` maps a language code (any codes you like) to an edge-tts voice. `default_lang` is used when the agent gives no language or one that is not in the table. `edge-tts --list-voices` lists all voices. Without the table voice replies are off for that bot and `/voice` says so. `telegram-bridge doctor` shows whether edge-tts and ffmpeg are found and which voices are set.
+
+Using it:
+
+- `/voice on` turns voice mode on for this chat and this bot, `/voice off` turns it off, `/voice` shows the state. Voice mode is kept in memory only and turns off whenever the session locks (`/lock`, idle lock, expiry) or the bridge restarts.
+- For a single spoken answer, just ask for it in your message ("answer by voice", "odpověz hlasem"). The agent decides itself; the bridge does not look for keywords.
+- The agent ends its reply with a block `[tg-voice cs]`, a short version for listening, and `[/tg-voice]`. The bridge removes the block from the text, speaks it with the voice for that language and sends the voice message before the text. The spoken text is masked like all other output and cut at about 1500 characters. In voice mode, a reply without a block is spoken from a cleaned copy of its text (no code or markdown).
+- It works for the local-model bot in fast chat mode too.
+- If speaking fails (edge-tts or ffmpeg missing, no internet), the text still arrives, followed by one line such as `🔇 voice reply failed: ffmpeg is not installed`.
+
+Privacy: the spoken text is sent to Microsoft's online text-to-speech service. Do not turn voice replies on if that is not acceptable for what you discuss.
 
 ## Sending messages from scripts
 

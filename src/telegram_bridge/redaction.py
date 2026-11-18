@@ -12,6 +12,7 @@ like a secret: quoted, or 8+ characters with a digit or a symbol, and not a plai
 """
 import re
 from collections.abc import Iterable
+from importlib import resources
 from urllib.parse import urlsplit, urlunsplit
 
 MASK = "[REDACTED]"
@@ -56,6 +57,39 @@ def _sensitive_params(s):
         if eq and (_SENSITIVE_PARAM.search(name) or _TOKENS.search(val)):
             return True
     return False
+
+# Seed phrases are plain words, so no pattern above sees them: mask 12+ BIP39 words in a row.
+# shortcut: English wordlist only, add other BIP39 lists (cs, es...) if someone needs them.
+_BIP39 = frozenset((resources.files("telegram_bridge") / "bip39_english.txt").read_text("ascii").split())
+SEED_MIN_WORDS = 12
+_WORD = re.compile(r"[A-Za-z]+")
+# Between seed words only spaces, commas, quotes, brackets and "1." / "2)" numbering. Not - _ . / so
+# code identifiers (field_number, top-left, border-image-slice) never form a run.
+_SEED_GAP = re.compile(r"""(?:[\s,"'\[\]]|\d{1,2}[.):]?)+\Z""")
+
+
+def _close(run, runs):
+    # Seeds rarely repeat a word; code and UI text do (false,false,false / Please ... this job).
+    if len(run) >= SEED_MIN_WORDS and len({m.group().lower() for m in run}) * 4 >= len(run) * 3:
+        runs.append((run[0].start(), run[-1].end()))
+
+
+def _mask_seeds(text):
+    """Replace each run of SEED_MIN_WORDS+ consecutive BIP39 words. Returns (text, count)."""
+    runs, run = [], []
+    for m in _WORD.finditer(text):
+        # Gap capped at 10 chars before the regex: keeps it fast (no backtracking on long digit runs).
+        if m.group().lower() in _BIP39 and (not run or (m.start() - run[-1].end() <= 10
+                                                        and _SEED_GAP.match(text, run[-1].end(), m.start()))):
+            run.append(m)
+            continue
+        _close(run, runs)
+        run = [m] if m.group().lower() in _BIP39 else []
+    _close(run, runs)
+    for a, b in reversed(runs):
+        text = text[:a] + MASK + text[b:]
+    return text, len(runs)
+
 
 _known: list[str] = []
 
@@ -108,6 +142,8 @@ def redact(text: str, known: Iterable[str] = ()) -> tuple[str, int]:
         c = text.count(v)
         if c:
             text, n = text.replace(v, MASK), n + c
+    text, seeds = _mask_seeds(text)
+    n += seeds
     text = _URL.sub(url, text)
     text = _AUTH.sub(lambda m: hit(m, 0), text)
     text = _PAIR.sub(pair, text)

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.0 (2026-11-18)
+
+- Seed phrases. Redaction now masks 12 or more words in a row from the English BIP39 wordlist, so a crypto wallet seed does not reach Telegram. Words joined by `-`, `_` or `.` and runs with many repeats don't count, which keeps code and UI text out.
+- Voice replies. The agent can answer with a Telegram voice message in addition to the text, for listening while driving. Text goes through edge-tts (Microsoft neural voices) and ffmpeg. Per-bot `[bots.<name>.voice]` table, `/voice on|off`, optional `tts` extra. Off unless configured. The spoken text is sent to Microsoft's TTS service.
+- `/voice` appears in the Telegram command menu only for bots that have voice replies configured.
+- The reply footer shows only the context percentage. The run cost is gone, because on a subscription it means nothing.
+
 ## 0.3.0 (2026-11-15)
 
 - Video, round video notes and GIFs. ffmpeg takes still frames and the audio is transcribed, so the agent can "watch" a clip. Clear reply for files over Telegram's 20 MB limit.

@@ -26,6 +26,7 @@ class Auth:
         self._fails = {}         # uid -> count
         self._locked_until = {}  # uid -> ts
         self._last_counter = 0   # last accepted TOTP time-step (replay protection)
+        self.lock_hooks = []     # callables(uid), run whenever a session ends (lock, idle lock, expiry)
         self.state_path = Path(state_path) if state_path else None
         self._load()
 
@@ -91,12 +92,18 @@ class Auth:
         if now >= exp:
             del self._expiry[uid]
             self._save()
+            self._fire_lock(uid)
             return False
         if self.idle_s and now - self._activity.get(uid, now) >= self.idle_s:
             del self._expiry[uid]   # idle too long: lock (needs a fresh 2FA code)
             self._save()
+            self._fire_lock(uid)
             return False
         return True
+
+    def _fire_lock(self, uid):
+        for hook in self.lock_hooks:
+            hook(uid)
 
     def touch(self, uid):
         """Record activity (any accepted message or command) from an unlocked uid."""
@@ -116,6 +123,7 @@ class Auth:
     def lock(self, uid):
         self._expiry.pop(uid, None)
         self._save()
+        self._fire_lock(uid)
 
     def unlock(self, uid, code):
         """Returns (ok, message)."""

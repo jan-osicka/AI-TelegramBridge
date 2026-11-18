@@ -92,13 +92,13 @@ def run_task(s, prompt="hi", reply_to=77):
 
 
 # ---- footer and warnings
-def test_claude_footer_with_cost_and_threading():
+def test_claude_footer_no_cost_and_threading():
     s = make()
     script_run(s, "Hello **world**", stats=stats())
     bot = run_task(s)
     status, answer = bot.sent[0], bot.sent[1]
     assert status["reply_parameters"].message_id == 77 and status["reply_parameters"].allow_sending_without_reply
-    assert answer["text"] == "Hello <b>world</b>\n\n· 42% context · $0.18" and answer["parse_mode"] == "HTML"
+    assert answer["text"] == "Hello <b>world</b>\n\n· 42% context" and answer["parse_mode"] == "HTML"
     assert answer["reply_parameters"].message_id == 77
     assert s.ctx[5]["pct"] == 42 and s.sessions[5] == "sid-1"
 
@@ -206,7 +206,7 @@ def test_long_answer_preview_and_document_then_footer():
     bot = run_task(s)
     assert bot.sent[1]["text"].startswith("<b>T</b>") and bot.sent[1]["text"].endswith("(full answer attached)")
     assert bot.docs[0][1].decode().startswith("# T") and bot.docs[0][2] == "answer.md"
-    assert bot.sent[2]["text"] == "· 42% context · $0.18"
+    assert bot.sent[2]["text"] == "· 42% context"
 
 
 def test_reply_kw_none_when_no_message():
