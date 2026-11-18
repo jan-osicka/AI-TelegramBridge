@@ -10,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [windows-latest, ubuntu-latest, macos-latest]
+        os: [windows-latest, ubuntu-latest, macos-15-intel]   # macos-latest (arm64) often waits for hours or is cancelled for lack of runners
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
