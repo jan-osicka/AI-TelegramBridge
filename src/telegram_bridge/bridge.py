@@ -1,5 +1,6 @@
 """Telegram -> Claude Code / local model bridge. Two bots, one process, long polling."""
 import asyncio
+import html as htmlmod
 import io
 import logging
 import logging.handlers
@@ -10,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from telegram import BotCommand, ReplyParameters, Update
-from telegram.error import BadRequest, Conflict
+from telegram.error import BadRequest, Conflict, NetworkError, RetryAfter, TelegramError
 from telegram.ext import Application, ContextTypes, MessageHandler, filters
 
 from . import chat as chatmod
@@ -146,6 +147,13 @@ RESTART_NOTICE = "⚠️ Bridge restarting. The task will be offered for /resume
 
 
 MAX_DOWNLOAD = 20 * 1024 * 1024
+TOO_BIG = "That file is too big for Telegram bots (max 20 MB)."
+VIDEO_TOO_BIG = "🎬 Video is too big for Telegram bots (max 20 MB). Send a shorter clip."
+UNSUPPORTED = "I can't read this kind of message. Send text, a voice message, a photo, a video or a file."
+EDIT_IGNORED = "✏️ Edits are not run. Send it as a new message."
+UNSENT_RETRY_S = 30.0
+SEND_TIMEOUT_S = 30.0   # the library default of 5 s gives up on sends that Telegram did accept
+PROBE_IDS = 10          # how many message ids after the last known one may hold an unconfirmed answer
 MAX_CHAT_IMAGES = 2
 
 
@@ -187,6 +195,9 @@ class BotService:
         self.heartbeat_s = float(general.get("heartbeat_seconds", 15))
         self.queue = asyncio.Queue()
         self.journal = journal or journalmod.Journal()   # in memory only unless main() passes the file-backed one
+        self._send_lock = asyncio.Lock()   # the retry loop must not resend an answer that is being sent
+        self.resend_task = None
+        self.last_id = {}   # chat_id -> newest message id seen: an unconfirmed answer has a higher one
         self._offered = False
         self.shutdown_killed = False   # stop() killed a running task: that task was interrupted
         self.shutting_down = False   # a stop for restart keeps the journal: the task counts as interrupted
@@ -283,41 +294,123 @@ class BotService:
         text, _ = redaction.redact(text)
         return await msg.reply_text(text, **kw)
 
+    def seen(self, chat, message):
+        mid = getattr(message, "message_id", None)
+        if mid:
+            self.last_id[chat] = max(mid, self.last_id.get(chat, 0))
+        return message
+
     async def send(self, chat, text, reply_to=None):
         text, _ = redaction.redact(text)
-        return await self.app.bot.send_message(chat, text, **reply_kw(reply_to))
+        return self.seen(chat, await self.app.bot.send_message(chat, text, **reply_kw(reply_to)))
 
     async def send_html(self, chat, html, plain, reply_to=None):
         """Send as Telegram HTML; if Telegram rejects it, resend the same chunk as plain text."""
         bot = self.app.bot
         try:
-            return await bot.send_message(chat, html, parse_mode="HTML", **reply_kw(reply_to))
+            return self.seen(chat, await bot.send_message(chat, html, parse_mode="HTML", **reply_kw(reply_to)))
         except BadRequest as e:
             log.warning("[%s] HTML rejected (%s); resending as plain text", self.name, e)
-            return await bot.send_message(chat, plain, **reply_kw(reply_to))
+            return self.seen(chat, await bot.send_message(chat, plain, **reply_kw(reply_to)))
 
-    async def send_rich(self, chat, text, reply_to=None, footer=""):
-        """Markdown -> Telegram HTML chunks (tag-safe split), the first one threaded to the user's message."""
-        text, _ = redaction.redact(text)   # raw text, before Markdown -> HTML and the split
+    def answer_parts(self, rec):
+        """[(method, args)] of one answer: inline if short, else a 500-char preview plus answer.md; the footer follows
+        either way. The same record always gives the same parts, so a retry continues where it stopped."""
+        text, reply_to, footer = rec["text"], rec["reply_to"], rec["footer"]
+        if len(text) > int(self.g["document_threshold_chars"]):
+            html, plain = fmt.preview_html(text, 500)
+            extra = NOTE + (REDACTED_NOTE if rec["hidden"] else "")
+            return ([(self.send_html, (html + extra, plain + extra, reply_to)), (self.send_answer_file, (text,))]
+                    + ([(self.send, (footer,))] if footer else []))
+        if rec["hidden"]:
+            text += REDACTED_NOTE
         chunks = fmt.with_footer(fmt.render_chunks(text), footer)
-        for i, (html, plain) in enumerate(chunks):
-            await self.send_html(chat, html, plain, reply_to if i == 0 else None)
+        return [(self.send_html, (html, plain, reply_to if i == 0 else None)) for i, (html, plain) in enumerate(chunks)]
+
+    async def send_answer_file(self, chat, text):
+        self.seen(chat, await self.app.bot.send_document(chat, io.BytesIO(text.encode("utf-8")), filename="answer.md"))
 
     async def send_answer(self, chat, text, reply_to=None, footer=""):
-        """A final answer: inline if short, else a 500-char preview plus answer.md. The footer follows either way."""
-        text, hidden = redaction.redact(text)
-        long = len(text) > int(self.g["document_threshold_chars"])
-        if hidden and not long:
-            text += REDACTED_NOTE
-        if long:
-            html, plain = fmt.preview_html(text, 500)
-            extra = NOTE + (REDACTED_NOTE if hidden else "")
-            await self.send_html(chat, html + extra, plain + extra, reply_to)
-            await self.app.bot.send_document(chat, io.BytesIO(text.encode("utf-8")), filename="answer.md")
-            if footer:
-                await self.send(chat, footer)
-        else:
-            await self.send_rich(chat, text, reply_to, footer)
+        """A final answer, kept on disk until Telegram accepts all of it. A network failure does not raise:
+        resend_loop tries again, also after a restart."""
+        text, hidden = redaction.redact(text)   # raw text, before Markdown -> HTML and the split
+        rec = {"id": uuid.uuid4().hex, "text": text, "hidden": bool(hidden), "reply_to": reply_to, "footer": footer,
+               "done": 0, "started": journalmod.now_iso(), "after": self.last_id.get(chat)}
+        async with self._send_lock:
+            self.journal.unsent_put(self.name, chat, rec)
+            await self.deliver(chat, rec)
+
+    def same_message(self, copy, send, args):
+        """Is this forwarded copy a message of this bot with the content that send(*args) produces?"""
+        if getattr(getattr(copy.forward_origin, "sender_user", None), "id", None) != self.app.bot.id:
+            return False
+        if send == self.send_answer_file:
+            return bool(copy.document) and copy.document.file_size == len(args[0].encode("utf-8"))
+        texts = [args[0]]
+        if send == self.send_html:
+            texts = [htmlmod.unescape(re.sub(r"<[^>]+>", "", args[0])), args[1]]
+        return "".join((copy.text or "").split()) in ["".join(t.split()) for t in texts]
+
+    async def already_sent(self, chat, after, send, args):
+        """After a timeout Telegram may have accepted the message. Bots cannot read the chat history, but forwarding
+        a message by id returns its content; the silent copy is deleted at once."""
+        for mid in range(after + 1, after + 1 + PROBE_IDS):
+            try:
+                copy = await self.app.bot.forward_message(chat, chat, mid, disable_notification=True)
+            except BadRequest:   # no message with this id
+                continue
+            self.seen(chat, copy)
+            try:
+                await self.app.bot.delete_message(chat, copy.message_id)
+            except TelegramError as e:
+                log.warning("[%s] could not delete a forwarded copy: %s", self.name, type(e).__name__)
+            if self.same_message(copy, send, args):
+                log.info("[%s] answer had arrived despite the error; not sent again", self.name)
+                return True
+        return False
+
+    async def deliver(self, chat, rec, retry=False):
+        """Send the parts not sent yet. Call with _send_lock held. retry: the first of them may have arrived."""
+        try:
+            parts = self.answer_parts(rec)
+            for send, args in parts[rec["done"]:]:
+                if not (retry and rec.get("after") and await self.already_sent(chat, rec["after"], send, args)):
+                    if retry:   # the next retry looks for the message sent now
+                        rec["after"] = max(rec.get("after") or 0, self.last_id.get(chat, 0))
+                        self.journal.unsent_put(self.name, chat, rec)
+                    await send(chat, *args)
+                retry = False
+                rec["done"] += 1
+                rec["after"] = self.last_id.get(chat)
+                if rec["done"] < len(parts):
+                    self.journal.unsent_put(self.name, chat, rec)
+        except Exception as e:
+            # BadRequest is a NetworkError too, but retrying cannot help
+            if isinstance(e, (NetworkError, RetryAfter)) and not isinstance(e, BadRequest):
+                log.warning("[%s] answer not delivered (%s); will retry", self.name, type(e).__name__)
+                return
+            self.journal.unsent_remove(self.name, chat, rec["id"])
+            raise
+        self.journal.unsent_remove(self.name, chat, rec["id"])
+
+    async def resend_unsent(self):
+        async with self._send_lock:
+            for chat, rec in self.journal.unsent(self.name):
+                if journalmod.age_days(rec) > journalmod.MAX_AGE_DAYS:
+                    self.journal.unsent_remove(self.name, chat, rec["id"])
+                elif self.auth.is_allowed(chat):   # private chats only, like the other notices after a restart
+                    try:
+                        await self.deliver(chat, rec, retry=True)
+                    except Exception as e:
+                        log.warning("[%s] saved answer dropped: %s", self.name, type(e).__name__)
+
+    async def resend_loop(self):
+        while True:
+            try:
+                await self.resend_unsent()
+            except Exception:
+                log.exception("[%s] resending saved answers failed", self.name)
+            await asyncio.sleep(UNSENT_RETRY_S)
 
     # ---- update handling
     async def on_update(self, update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -365,8 +458,14 @@ class BotService:
                     log.exception("[%s] could not send locked notice", self.name)
             return
 
+        if getattr(update, "edited_message", None) is not None:   # fixing a typo must not run the task a second time
+            if text:   # live locations are edited all the time and have no text
+                await msg.reply_text(EDIT_IGNORED, **QUOTE)
+            return
+
         self.auth.touch(uid)   # idle auto-lock counts any accepted message or command
         chat = msg.chat_id
+        self.seen(chat, msg)
         if cmd:
             await self.command(update, cmd, arg, uid, chat)
             return
@@ -675,7 +774,7 @@ class BotService:
                 caption, path = tr, None
             elif vid:
                 if (getattr(vid, "file_size", None) or 0) > MAX_DOWNLOAD:
-                    await msg.reply_text("🎬 Video is too big for Telegram bots (max 20 MB). Send a shorter clip.")
+                    await msg.reply_text(VIDEO_TOO_BIG)
                     return None
                 path = await self.download(ctx, vid.file_id, getattr(vid, "file_name", None) or "video.mp4")
                 images, extra = await self.process_video(msg, path)
@@ -693,11 +792,12 @@ class BotService:
         except Exception as e:
             log.exception("[%s] media handling failed", self.name)
             if "too big" in str(e).lower():
-                await self.say(msg, "🎬 Video is too big for Telegram bots (max 20 MB). Send a shorter clip.")
+                await msg.reply_text(VIDEO_TOO_BIG if vid else TOO_BIG)
             else:
                 await self.say(msg, f"Media handling failed: {e}")
             return None
         if not caption and not path:
+            await msg.reply_text(UNSUPPORTED)
             return None
         if self.chat_enabled:
             mode, caption = chatmod.route(caption or "", self.mode, bool(images), has_file,
@@ -877,7 +977,7 @@ class BotService:
         self.cold_start = False
         t0 = time.monotonic()
         first = f"⏳ {self.display} is working…"
-        status = await bot.send_message(chat, first, **reply_kw(reply_to))
+        status = self.seen(chat, await bot.send_message(chat, first, **reply_kw(reply_to)))
         interval = float(self.g["edit_interval_seconds"])
         st = {"edit": t0, "text": first, "steps": 0, "tool": ""}
         subs = progress.Tracker(time.monotonic, fmt_tool)
@@ -898,7 +998,42 @@ class BotService:
             except Exception:
                 pass
 
+        async def delete_status():
+            try:
+                await status.delete()
+            except Exception:
+                pass
+
+        async def answer(final, sid, is_err, usable=True, done=False):
+            nonlocal prev_sid
+            stats = self.runner.stats
+            pct = ctxinfo.percent(stats.context_tokens, stats.context_window) if usable else None
+            notes = []
+            if sid and not is_err:
+                if sid != prev_sid:
+                    self.ctx.pop(chat, None)     # a new session id: forget flags/usage of the old one
+                prev_sid = sid
+                self.sessions[chat] = sid
+                self.ctx_entry(chat)["last"] = self.wall()
+                if pct is not None:
+                    e = self.ctx_entry(chat)
+                    warned = set(e["warned"])
+                    notes = ([ctxinfo.COMPACTED_NOTICE] if stats.compacted else []) + ctxinfo.warnings(pct, warned)
+                    e.update(tokens=stats.context_tokens, window=stats.context_window, pct=pct, warned=sorted(warned))
+                self.save_state()
+            if done:
+                await delete_status()
+            await self.send_result(chat, final, is_err, reply_to, user_text or prompt, ctxinfo.footer(pct))
+            for n in notes:
+                await self.send(chat, n)
+
         async def on_event(ev):
+            if ev["kind"] == "answer":   # background work goes on: this answer must not wait for it
+                try:
+                    await answer(ev["text"], ev["session_id"], ev["is_error"])
+                except Exception:   # must not kill the run
+                    log.exception("[%s] sending an answer failed", self.name)
+                return
             changed = subs.feed(ev)
             if ev["kind"] == "tool":
                 st["steps"] += 1
@@ -918,36 +1053,23 @@ class BotService:
             final, sid, is_err = await self.runner.run(prompt, prev_sid, on_event)
         finally:
             beat.cancel()
-        stats = self.runner.stats
-        usable = not (self.runner.stopped or self.runner.timed_out)
-        pct = ctxinfo.percent(stats.context_tokens, stats.context_window) if usable else None
-        notes = []
-        if sid and not is_err:
-            if sid != prev_sid:
-                self.ctx.pop(chat, None)     # a new session id: forget flags/usage of the old one
-            self.sessions[chat] = sid
-            self.ctx_entry(chat)["last"] = self.wall()
-            if pct is not None:
-                e = self.ctx_entry(chat)
-                warned = set(e["warned"])
-                notes = ([ctxinfo.COMPACTED_NOTICE] if stats.compacted else []) + ctxinfo.warnings(pct, warned)
-                e.update(tokens=stats.context_tokens, window=stats.context_window, pct=pct, warned=sorted(warned))
-            self.save_state()
-        try:
-            await status.delete()
-        except Exception:
-            pass
+        if final is None:   # everything was delivered while the run was still going
+            await delete_status()
+            return
+        await answer(final, sid, is_err, usable=not (self.runner.stopped or self.runner.timed_out), done=True)
+
+    async def send_result(self, chat, final, is_err, reply_to, user_text, footer):
+        """One answer of an agent run: voice, text and [tg-file] files."""
         spoken = None
         if not is_err:
             final, spoken = self.voice_split(chat, final)
         final = final or ("🔊" if spoken else "(empty response)")
         if self.chat_enabled and not is_err:   # chat mode must see agent turns too
-            self.chats.add_turn(chat, user_text or prompt, final)
+            self.chats.add_turn(chat, user_text, final)
             self.last_mode[chat] = "agent"
             self.save_state()
         if is_err:
             final = "⚠️ " + final
-        footer = ctxinfo.footer(pct)
         files = []
         if self.outgoing_files:
             final, items = outfiles.extract(final)
@@ -963,11 +1085,9 @@ class BotService:
             final = note if final == "🔊" else final + "\n\n" + note
         await self.send_answer(chat, final, reply_to, footer)
         if files:
-            for n in await outfiles.send(bot, chat, files, self.allowed_dirs(), [], reply_to,
+            for n in await outfiles.send(self.app.bot, chat, files, self.allowed_dirs(), [], reply_to,
                                           base=self.cwd_for(chat)):
-                await self.send(chat, n)
-        for n in notes:
-            await self.send(chat, n)
+                await self.send_answer(chat, n)
 
     # ---- pinned lock status
     async def update_pin(self, uid):
@@ -1021,7 +1141,8 @@ class BotService:
             log.warning("[%s] polling error: %s: %s", self.name, key, err)
 
     async def start(self):
-        self.app = Application.builder().token(self.token).build()
+        self.app = (Application.builder().token(self.token).read_timeout(SEND_TIMEOUT_S)
+                    .write_timeout(SEND_TIMEOUT_S).media_write_timeout(SEND_TIMEOUT_S).build())
         self.app.add_handler(MessageHandler(filters.ALL & ~filters.StatusUpdate.ALL, self.on_update))
         await self.app.initialize()
         await self.app.bot.set_my_commands([BotCommand(c, d) for c, d in commands_for(self.cfg)])
@@ -1031,6 +1152,7 @@ class BotService:
         me = await self.app.bot.get_me()
         log.info("[%s] started as @%s", self.name, me.username)
         await self.announce_online()
+        self.resend_task = asyncio.create_task(self.resend_loop())
         if self.pin_enabled:
             self.pin_active = True
             self.pin_task = asyncio.create_task(self.pin_loop())
@@ -1044,9 +1166,13 @@ class BotService:
             if not self.auth.is_allowed(chat):   # private chats only: chat id == allowed user id
                 continue
             pct = (self.ctx.get(chat) or {}).get("pct") if chat in self.sessions else None
-            text = f"🟢 {self.display} is back online. Context kept" + (f" ({pct}%)." if pct is not None else ".")
+            idle = self.idle_reset_due(chat) if chat in self.sessions else None
+            if idle is not None:   # the next message will start fresh, so "context kept" would be wrong
+                text = f"🟢 {self.display} is back online. {ctxinfo.idle_online_notice(idle)}"
+            else:
+                text = f"🟢 {self.display} is back online. Context kept" + (f" ({pct}%)." if pct is not None else ".")
             try:
-                await self.app.bot.send_message(chat, text)
+                self.seen(chat, await self.app.bot.send_message(chat, text))
             except Exception as e:
                 log.warning("[%s] startup notice to %s failed: %s", self.name, chat, type(e).__name__)
 
@@ -1064,6 +1190,8 @@ class BotService:
             self.worker.cancel()
         if self.pin_task:
             self.pin_task.cancel()
+        if self.resend_task:
+            self.resend_task.cancel()
         if self.app:
             try:
                 if self.app.updater.running:

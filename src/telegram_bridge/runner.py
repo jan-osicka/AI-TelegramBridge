@@ -134,6 +134,7 @@ def uses_stdin(bot_cfg):
 
 
 kill_tree = osutil.kill_tree
+ANSWER_GRACE_S = 3.0   # a result while the process lives on this long means background work is still running
 
 
 class Runner:
@@ -151,7 +152,8 @@ class Runner:
         return self.proc is not None and self.proc.returncode is None
 
     async def run(self, prompt, session_id=None, on_event=None):
-        """Returns (final_text, session_id, is_error)."""
+        """Returns (final_text, session_id, is_error). A run with background work has several results: the earlier
+        ones go to on_event as kind "answer"; final_text is None when nothing is left to deliver after them."""
         stdin_mode = uses_stdin(self.cfg)
         cmd = build_cmd(self.cfg, prompt, session_id)
         env = os.environ.copy()
@@ -164,7 +166,7 @@ class Runner:
             limit=64 * 1024 * 1024, **osutil.spawn_kwargs())
         stderr_task = asyncio.create_task(self.proc.stderr.read())
         state = {"sid": session_id, "final": None, "is_error": False, "last_text": "",
-                 "ctx": None, "model": None, "compacted": False, "cost": None, "windows": {}}
+                 "ctx": None, "model": None, "compacted": False, "cost": None, "windows": {}, "answered": False}
         self.stats = RunStats()
         err = ""
         try:
@@ -194,24 +196,46 @@ class Runner:
             mins = self.timeout_s / 60
             return f"Task timed out after {mins:g} min and was stopped.", sid, True
         if final is None:
+            if state["answered"] and not state["last_text"] and self.proc.returncode == 0:
+                return None, sid, False
             final = state["last_text"] or f"Agent exited with code {self.proc.returncode}.\n{err[-1500:]}"
             return final, sid, True
         return final, sid, state["is_error"]
 
     async def _read_events(self, state, on_event):
+        loop = asyncio.get_running_loop()
+        deadline = None   # when a held result goes out although the process is still running
         while True:
-            raw = await self.proc.stdout.readline()
+            try:
+                async with asyncio.timeout_at(deadline):
+                    raw = await self.proc.stdout.readline()
+            except TimeoutError:
+                deadline = None
+                await self._flush_answer(state, on_event)
+                continue
             if not raw:
                 break
             for ev in parse_events(raw.decode("utf-8", "replace")):
+                if ev["kind"] == "result":
+                    await self._flush_answer(state, on_event)
+                    deadline = loop.time() + ANSWER_GRACE_S
                 await self._handle(ev, state, on_event)
+
+    async def _flush_answer(self, state, on_event):
+        """Deliver the held result now, so a later result of the same run does not replace it."""
+        if state["final"] is None or not on_event:
+            return
+        ev = {"kind": "answer", "text": state["final"], "session_id": state["sid"], "is_error": state["is_error"]}
+        self.stats = self._make_stats(state)
+        state.update(final=None, is_error=False, last_text="", answered=True, compacted=False)
+        await on_event(ev)
 
     async def _handle(self, ev, state, on_event):
         if ev.get("ctx") and not ev.get("sub"):   # last main-agent API call = current context size
             state["ctx"], state["model"] = ev["ctx"], ev.get("model") or state["model"]
         if ev["kind"] == "session":
             state["sid"] = ev["session_id"]
-        elif ev["kind"] == "text":
+        elif ev["kind"] == "text" and not ev.get("sub"):   # subagent text is never the answer
             state["last_text"] = ev["text"]
         elif ev["kind"] == "compact":
             state["compacted"] = True

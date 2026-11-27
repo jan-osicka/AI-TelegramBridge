@@ -32,6 +32,9 @@ Anything else is a task for the agent.
 
 - While a task runs, one status message is edited with the elapsed time, the current tool and subagents. Messages sent meanwhile wait in a queue.
 - The reply ends with a context line such as `42% context`.
+- If the agent leaves work running in the background, its answer comes right away and the result follows as another message. New messages wait until the background work ends.
+- If Telegram cannot be reached, the answer is saved (with secrets masked, in `inflight.json`) and sent again every 30 seconds, also after a restart, for up to 7 days. After a timeout Telegram may have received it already, so the bridge first looks for it: it forwards the few messages that could be it to the same chat, silently, compares them and deletes the copies at once.
+- Editing a message you already sent does not run it. Send a new one.
 - Replies longer than `document_threshold_chars` are sent as a file. Other messages are split at Telegram's limit of 4096 characters.
 - Send a photo, document or voice message and the agent gets the file path. Voice is transcribed first when the `voice` extra is installed. Downloads older than `inbox_retention_days` are deleted.
 - Videos, round video notes and GIFs work too, up to the 20 MB limit of Telegram bots. With ffmpeg installed, the bridge takes `video_frames` still frames (doubled for clips over 60 seconds, at most 8) and transcribes the audio when `video_transcribe` is on. The agent gets the video path, the transcript and the frame paths. Without ffmpeg only the file is passed on.

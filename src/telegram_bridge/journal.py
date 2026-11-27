@@ -1,5 +1,6 @@
 """In-flight journal (inflight.json): the running task and the waiting queue per bot and chat, so a restart can offer /resume.
-Layout: {"bots": {bot: {chat: {"running": rec|None, "queue": [rec], "pending": {"task": rec|None, "queue": [rec]}}}}}.
+Layout: {"bots": {bot: {chat: {"running": rec|None, "queue": [rec], "pending": {"task": rec|None, "queue": [rec]}, "unsent": [rec]}}}}.
+"unsent" holds finished answers Telegram has not accepted yet; they are sent again until they are delivered.
 "running"/"queue" belong to this process; at startup they are moved to "pending" (the interrupted work awaiting /resume or /drop).
 Written atomically; a corrupt file is treated as empty. With path=None everything stays in memory."""
 import json
@@ -74,7 +75,7 @@ class Journal:
         for bot in list(d["bots"]):
             for chat in list(d["bots"][bot]):
                 e = d["bots"][bot][chat]
-                if not e.get("running") and not e.get("queue") and not e.get("pending"):
+                if not e.get("running") and not e.get("queue") and not e.get("pending") and not e.get("unsent"):
                     del d["bots"][bot][chat]
             if not d["bots"][bot]:
                 del d["bots"][bot]
@@ -115,6 +116,26 @@ class Journal:
             e = self._entry(d, bot, chat)
             e["queue"] = [r for r in e["queue"] if r.get("jid") != jid]
         self._update(fn)
+
+    # ---- answers not delivered yet
+    def unsent_put(self, bot, chat, rec):
+        """Add the answer, or update its record (how many parts are already sent)."""
+        def fn(d):
+            e = self._entry(d, bot, chat)
+            e["unsent"] = [r for r in e.get("unsent") or [] if r["id"] != rec["id"]] + [dict(rec)]
+        self._update(fn)
+
+    def unsent_remove(self, bot, chat, rec_id):
+        def fn(d):
+            e = self._entry(d, bot, chat)
+            e["unsent"] = [r for r in e.get("unsent") or [] if r["id"] != rec_id]
+        self._update(fn)
+
+    def unsent(self, bot):
+        """[(chat, record)] of everything still waiting."""
+        with self._lock:
+            chats = self._read()["bots"].get(bot, {})
+            return [(int(c), dict(r)) for c, e in chats.items() for r in e.get("unsent") or []]
 
     # ---- restart handling
     def recover(self, bot):

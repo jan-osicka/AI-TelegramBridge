@@ -184,15 +184,15 @@ def test_status_command_shows_context():
 # ---- HTML sending
 def test_html_rejected_falls_back_to_plain_per_chunk():
     s = make()
-    asyncio.run(s.send_rich(5, "BAD **bold** text", reply_to=9))
+    asyncio.run(s.send_answer(5, "BAD **bold** text", reply_to=9))
     m = s.app.bot.sent[0]
     assert m["text"] == "BAD **bold** text" and "parse_mode" not in m and m["reply_parameters"].message_id == 9
 
 
 def test_long_reply_chunks_only_first_is_threaded_and_code_survives():
-    s = make()
+    s = make(document_threshold_chars=100_000)
     text = "```py\n" + "\n".join(f"v{i} = 1 < 2" for i in range(1200)) + "\n```"
-    asyncio.run(s.send_rich(5, text, reply_to=3, footer="· 5% context"))
+    asyncio.run(s.send_answer(5, text, reply_to=3, footer="· 5% context"))
     sent = s.app.bot.sent
     assert len(sent) >= 3 and "reply_parameters" in sent[0] and all("reply_parameters" not in m for m in sent[1:])
     assert all(m["parse_mode"] == "HTML" and len(m["text"]) <= 4096 for m in sent)
@@ -363,6 +363,18 @@ def test_startup_notice_without_pct_history_only_and_nothing_persisted(tmp_path)
     s2.sessions[5] = "sid"
     asyncio.run(s2.announce_online())
     assert s2.app.bot.texts() == ["🟢 Claude is back online. Context kept."]    # no pct known
+
+
+def test_startup_notice_idle_big_session_says_new_session(tmp_path):
+    store = StateStore(tmp_path / "s.json")
+    store.save("claude", {5: "sid"}, {}, {}, {5: {"tokens": 84000, "window": 200000, "pct": 42,
+                                                 "warned": [], "trimmed": False, "last": 0.0}})
+    s = make(store=store)
+    s.cfg = {**s.cfg, "idle_new_session_minutes": 60, "idle_new_session_tokens": 30000}
+    s.wall = lambda: 8 * 86400.0
+    asyncio.run(s.announce_online())
+    assert s.app.bot.texts() == ["🟢 Claude is back online. Last session idle 8 d, "
+                                 "your next message starts a new one (/back returns to it)."]
 
 
 def test_startup_notice_send_failure_does_not_raise(tmp_path):

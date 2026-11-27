@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.0 (2026-11-27)
+
+- Background jobs. When a run starts background work, its answer is delivered right away and the result of the job follows as a second message. Before, only the last one arrived.
+- Answers are saved until Telegram accepts them. A network failure no longer loses a finished answer: it is sent again every 30 seconds, also after a restart, for up to 7 days. Before sending again the bridge checks whether the message did arrive, so a timeout does not cause a duplicate.
+- Stickers, locations, contacts and other unsupported messages get a short reply. A document over 20 MB is no longer called a video.
+- Editing a sent message does not run it again.
+- If a run dies without a result, text of a subagent is never shown as the answer.
+- The startup notice no longer says the context is kept when the saved session is big and idle. It says the next message starts a new session, and `/back` returns to the old one.
+
 ## 0.4.0 (2026-11-18)
 
 - Seed phrases. Redaction now masks 12 or more words in a row from the English BIP39 wordlist, so a crypto wallet seed does not reach Telegram. Words joined by `-`, `_` or `.` and runs with many repeats don't count, which keeps code and UI text out.

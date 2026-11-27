@@ -54,6 +54,10 @@ def idle_reset_notice(idle_s, tokens):
             f"cached, so continuing it would re-read all of it. /back returns to it.")
 
 
+def idle_online_notice(idle_s):
+    return f"Last session idle {_ago(idle_s)}, your next message starts a new one (/back returns to it)."
+
+
 def back_notice(tokens):
     return f"↩️ Back to the previous session (~{round((tokens or 0) / 1000)}k tokens). The next message re-reads it in full."
 
