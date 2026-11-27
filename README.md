@@ -146,7 +146,7 @@ Options: `--bot NAME`, `--file PATH` (repeatable), `--silent`. Exit codes: 0 ok,
 The agent has full access to the computer. The example config starts Claude Code with `--permission-mode bypassPermissions`, so it never asks before running a command. That is the point of the tool, and it is why the access control is strict:
 
 - Only whitelisted Telegram ids get any answer. Everyone else is ignored and logged.
-- Every session starts with a TOTP code, wrong codes lock you out, and sessions expire after a set time and after inactivity.
+- Every session starts with a TOTP code. Five wrong codes lock you out for 15 minutes. An unlock lasts 12 hours, and the bridge locks itself after 3 hours without a message. All of these can be changed in the config.
 - Secrets are masked in everything that leaves the bridge.
 - The agent can send only files from the outbox.
 
